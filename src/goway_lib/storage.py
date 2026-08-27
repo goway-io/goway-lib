@@ -94,3 +94,70 @@ class Storage:
     async def delete_object(self, key: str) -> None:
         async with self._client() as s3:
             await s3.delete_object(Bucket=self.bucket, Key=key)
+
+
+@dataclass(frozen=True)
+class FileKindSpec:
+    max_bytes: int
+    content_types: frozenset[str]
+
+
+async def create_upload_slot(
+    file_repo,
+    storage: "Storage",
+    *,
+    org_id: uuid.UUID,
+    created_by: uuid.UUID,
+    kind: str,
+    content_type: str,
+    size_bytes: int,
+    kinds: dict[str, FileKindSpec],
+) -> dict:
+
+    from goway_lib.errors import BadRequest
+
+    spec = kinds.get(kind)
+    if spec is None:
+        raise BadRequest("Unknown file kind", code="FILE_KIND_INVALID", key="files.kind_invalid")
+    if content_type not in spec.content_types:
+        raise BadRequest(
+            "Content type not allowed for this kind",
+            code="FILE_TYPE_INVALID",
+            key="files.type_invalid",
+            params={"allowed": sorted(spec.content_types)},
+        )
+    if not 0 < size_bytes <= spec.max_bytes:
+        raise BadRequest(
+            "File too large", code="FILE_TOO_LARGE", key="files.too_large", params={"max_bytes": spec.max_bytes}
+        )
+    key = f"{kind}/{org_id}/{uuid.uuid7()}"
+    record = await file_repo.create(
+        org_id=org_id,
+        created_by=created_by,
+        kind=kind,
+        bucket=storage.bucket,
+        key=key,
+        content_type=content_type,
+        size_bytes=size_bytes,
+    )
+    url, fields = await storage.presign_upload(key=key, content_type=content_type, max_bytes=spec.max_bytes)
+    return {"file_id": record.id, "url": url, "fields": fields}
+
+
+async def require_uploaded(
+    file_repo, storage: "Storage", file_id: uuid.UUID, org_id: uuid.UUID, *, kinds: tuple[str, ...]
+) -> None:
+    
+    from goway_lib.errors import BadRequest, UpstreamUnavailable
+
+    record = await file_repo.get_owned(file_id, org_id)
+    if record is None or record.kind not in kinds:
+        raise BadRequest("File not found for this account", code="FILE_INVALID", key="files.invalid")
+    if record.status != "ready":
+        try:
+            uploaded = await storage.object_exists(record.key)
+        except Exception as exc:
+            raise UpstreamUnavailable("Storage unavailable", params={"service": "storage"}) from exc
+        if not uploaded:
+            raise BadRequest("File is not uploaded yet", code="FILE_NOT_UPLOADED", key="files.not_uploaded")
+        await file_repo.update(record, status="ready")
