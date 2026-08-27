@@ -12,3 +12,7 @@ class ServiceSettings(BaseSettings):
     GLITCHTIP_DSN: str = ""
     OTEL_EXPORTER_OTLP_ENDPOINT: str = ""
     LOG_LEVEL: str = "INFO"
+    S3_ENDPOINT: str = "http://localhost:9000"
+    S3_ACCESS_KEY: str = ""
+    S3_SECRET_KEY: str = ""
+    S3_BUCKET: str = ""
