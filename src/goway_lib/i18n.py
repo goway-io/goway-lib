@@ -92,16 +92,13 @@ def resolve_localized(mapping: dict[str, str], language: str) -> str | None:
         return None
     chain = (language, *LANGUAGES[language].fallbacks) if language in LANGUAGES else (DEFAULT_LANGUAGE,)
     for code in chain:
-        if code == "uzc" or (language == "uzc" and code == "uz"):
-            value = mapping.get("uzc")
-            if value:
-                return value
-            latin = mapping.get("uz")
-            if latin:
-                return to_cyrillic(latin)
         value = mapping.get(code)
         if value:
             return value
+        if code == "uzc":
+            latin = mapping.get("uz")
+            if latin:
+                return to_cyrillic(latin)
     value = mapping.get(DEFAULT_LANGUAGE)
     if value:
         return value
