@@ -59,3 +59,18 @@ async def test_string_length_guard(db):
     with pytest.raises(FieldTooLong):
         await repo.create(name="x" * 11)
         await db.flush()
+
+
+def test_constraints_get_deterministic_names():
+    fk = next(iter(Thing.metadata.tables["things"].foreign_keys), None)
+    assert fk is None
+    from sqlalchemy import ForeignKey
+    from sqlalchemy.orm import mapped_column
+
+    class Child(SoftDeleteModel):
+        __tablename__ = "children"
+        thing_id: Mapped[str] = mapped_column(ForeignKey("things.id"))
+        name: Mapped[str] = mapped_column(String(10))
+
+    fk_constraint = next(iter(Child.metadata.tables["children"].foreign_key_constraints))
+    assert fk_constraint.name == "fk_children_thing_id"

@@ -22,8 +22,9 @@ async def connect(nats_url: str, *, subjects: list[str] | None = None) -> None:
         nats.connect(nats_url, max_reconnect_attempts=-1, connect_timeout=2), CONNECT_TIMEOUT_SECONDS
     )
     _js = _nc.jetstream()
+    default_subjects = ["order.>", "offer.>", "wallet.>", "driver.>", "user.>", "device.>"]
     try:
-        await _js.add_stream(name=STREAM, subjects=subjects or ["order.>", "offer.>", "wallet.>", "driver.>", "user.>"])
+        await _js.add_stream(name=STREAM, subjects=subjects or default_subjects)
     except Exception:
         logger.debug("stream %s already exists", STREAM)
 
