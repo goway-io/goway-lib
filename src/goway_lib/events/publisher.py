@@ -15,6 +15,20 @@ STREAM = "GOWAY"
 
 CONNECT_TIMEOUT_SECONDS = 5.0
 
+DEFAULT_SUBJECTS = [
+    "order.>",
+    "offer.>",
+    "wallet.>",
+    "driver.>",
+    "user.>",
+    "device.>",
+    "vehicle.>",
+    "carrier.>",
+    "region.>",
+    "load.>",
+    "booking.>",
+]
+
 
 async def connect(nats_url: str, *, subjects: list[str] | None = None) -> None:
     global _nc, _js
@@ -22,11 +36,20 @@ async def connect(nats_url: str, *, subjects: list[str] | None = None) -> None:
         nats.connect(nats_url, max_reconnect_attempts=-1, connect_timeout=2), CONNECT_TIMEOUT_SECONDS
     )
     _js = _nc.jetstream()
-    default_subjects = ["order.>", "offer.>", "wallet.>", "driver.>", "user.>", "device.>"]
+    desired = subjects or DEFAULT_SUBJECTS
     try:
-        await _js.add_stream(name=STREAM, subjects=subjects or default_subjects)
+        info = await _js.stream_info(STREAM)
+        current = list(info.config.subjects or [])
+        merged = sorted(set(current) | set(desired))
+        if merged != sorted(current):
+            info.config.subjects = merged
+            await _js.update_stream(info.config)
+            logger.info("stream %s subjects extended to %s", STREAM, merged)
     except Exception:
-        logger.debug("stream %s already exists", STREAM)
+        try:
+            await _js.add_stream(name=STREAM, subjects=desired)
+        except Exception:
+            logger.warning("stream %s neither inspectable nor creatable", STREAM)
 
 
 def jetstream() -> JetStreamContext:

@@ -26,3 +26,26 @@ def test_problem_responses_openapi():
     responses = problem_responses(400, 404)
     assert set(responses) == {400, 404}
     assert "application/problem+json" in responses[404]["content"]
+
+
+def test_every_published_subject_is_stream_covered():
+    from goway_lib.events.publisher import DEFAULT_SUBJECTS
+
+    published = [
+        "order.created",
+        "offer.accepted",
+        "wallet.balance_changed",
+        "driver.presence_changed",
+        "user.created",
+        "user.updated",
+        "user.session_revoked",
+        "device.upserted",
+        "vehicle.upserted",
+        "carrier.verification_changed",
+        "region.updated",
+        "load.posted",
+        "booking.created",
+    ]
+    prefixes = tuple(s[:-1] for s in DEFAULT_SUBJECTS if s.endswith(">"))
+    uncovered = [s for s in published if not s.startswith(prefixes)]
+    assert uncovered == []
