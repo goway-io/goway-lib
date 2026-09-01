@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from goway_lib.errors import FieldTooLong
+from goway_lib.timeutils import now_utc
 
 
 def make_engine(database_url: str, *, echo: bool = False) -> AsyncEngine:
@@ -34,8 +35,8 @@ class BaseModel(Base):
     __abstract__ = True
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid7)
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(default=now_utc, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(default=now_utc, onupdate=now_utc, server_default=func.now())
 
 
 class SoftDeleteModel(BaseModel):

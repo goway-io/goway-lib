@@ -147,7 +147,7 @@ async def create_upload_slot(
 async def require_uploaded(
     file_repo, storage: "Storage", file_id: uuid.UUID, org_id: uuid.UUID, *, kinds: tuple[str, ...]
 ) -> None:
-    
+
     from goway_lib.errors import BadRequest, UpstreamUnavailable
 
     record = await file_repo.get_owned(file_id, org_id)

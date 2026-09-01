@@ -27,6 +27,9 @@ DEFAULT_SUBJECTS = [
     "region.>",
     "load.>",
     "booking.>",
+    "dlq.>",
+    "location.>",
+    "dispatch.>",
 ]
 
 
