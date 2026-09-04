@@ -30,6 +30,7 @@ DEFAULT_SUBJECTS = [
     "dlq.>",
     "location.>",
     "dispatch.>",
+    "settings.>",
 ]
 
 
