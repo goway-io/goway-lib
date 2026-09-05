@@ -31,6 +31,9 @@ DEFAULT_SUBJECTS = [
     "location.>",
     "dispatch.>",
     "settings.>",
+    "rating.>",
+    "support.>",
+    "org.>",
 ]
 
 
