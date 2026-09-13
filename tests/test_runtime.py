@@ -12,6 +12,7 @@ from goway_lib.db import Base
 from goway_lib.errors import BadRequest
 from goway_lib.events.outbox import OutboxEvent
 from goway_lib.handlers import install_handlers
+from goway_lib.pagination import PageParams
 from goway_lib.runtime import RuntimeSchema, RuntimeSetting, RuntimeStore, runtime_settings_router
 
 
@@ -49,7 +50,7 @@ async def test_defaults_overrides_reset_and_history(maker):
 
         after_reset = await store.reset(db, "free_minutes", actor_id=None)
         assert after_reset.free_minutes == 15
-        history = await store.history(db)
+        history = (await store.history(db, PageParams(), transformer=None)).items
         assert [(h.key, h.old_value, h.new_value) for h in history] == [
             ("free_minutes", 20, None),
             ("free_minutes", None, 20),
@@ -97,7 +98,8 @@ async def test_admin_router_validates_bounds_and_role(maker):
         assert r.status_code == 200 and r.json()["values"]["free_minutes"] == 25
         r = await client.delete("/admin/settings/free_minutes", headers=admin)
         assert r.json()["values"]["free_minutes"] == 15
-        assert len((await client.get("/admin/settings/history", headers=admin)).json()["items"]) == 2
+        listed = (await client.get("/admin/settings/history", headers=admin)).json()
+        assert len(listed["items"]) == 2 and listed["page"]["total"] == 2 and listed["page"]["pages"] == 1
 
 
 async def test_bad_stored_override_is_dropped_alone(maker):

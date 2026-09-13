@@ -5,7 +5,7 @@ from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from goway_lib.db import SoftDeleteModel
-from goway_lib.pagination import Page, paginate
+from goway_lib.pagination import OffsetPage, Page, PageParams, paginate, paginate_offset
 from goway_lib.timeutils import now_utc
 
 M = TypeVar("M")
@@ -44,6 +44,32 @@ class BaseRepository(Generic[M]):
         for opt in options or []:
             q = q.options(opt)
         return await paginate(self.db, q, self.model, cursor=cursor, limit=limit, transformer=transformer)
+
+    async def list_offset_page(
+        self,
+        *,
+        pages: PageParams | None = None,
+        where: list | None = None,
+        options: list | None = None,
+        order_by: Any = None,
+        transformer: Any = None,
+    ) -> OffsetPage[Any]:
+        """Numbered pages with a total, for admin tables. Same filters as `list_page`. The id is
+        appended to any ordering so rows tied on the sort column keep a stable place across pages."""
+        pages = pages or PageParams()
+        q = self.query()
+        for clause in where or []:
+            q = q.where(clause)
+        ordering = [] if order_by is None else order_by if isinstance(order_by, list) else [order_by]
+        return await paginate_offset(
+            self.db,
+            q,
+            number=pages.number,
+            size=pages.size,
+            order_by=[*ordering, self.model.id.desc()],
+            options=options,
+            transformer=transformer,
+        )
 
     async def create(self, **kwargs: Any) -> M:
         obj = self.model(**kwargs)

@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Any, Generic, TypeVar
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field, create_model
 from sqlalchemy import JSON, String, func, select
 from sqlalchemy.dialects import postgresql, sqlite
@@ -16,7 +16,7 @@ from goway_lib.db import Base
 from goway_lib.db import BaseModel as DbModel
 from goway_lib.errors import BadRequest, problem_responses
 from goway_lib.events import publish_event
-from goway_lib.pagination import Page, PageInfo
+from goway_lib.pagination import OffsetPage, PageParams, PageQuery, paginate_offset
 from goway_lib.timeutils import now_utc
 
 logger = logging.getLogger(__name__)
@@ -188,9 +188,15 @@ class RuntimeStore(Generic[S]):
         changed = {name: value for name, value in values.items() if name != "key"}
         return statement.on_conflict_do_update(index_elements=["key"], set_=changed)
 
-    async def history(self, db: AsyncSession, *, limit: int = 50) -> list[RuntimeSettingHistory]:
-        q = select(RuntimeSettingHistory).order_by(RuntimeSettingHistory.created_at.desc()).limit(limit)
-        return list((await db.execute(q)).scalars().all())
+    async def history(self, db: AsyncSession, pages: PageParams, transformer) -> OffsetPage:
+        return await paginate_offset(
+            db,
+            select(RuntimeSettingHistory),
+            number=pages.number,
+            size=pages.size,
+            order_by=[RuntimeSettingHistory.created_at.desc(), RuntimeSettingHistory.id.desc()],
+            transformer=transformer,
+        )
 
     def _announce(self, db: AsyncSession, keys: list[str], actor_id: uuid.UUID | None) -> None:
         publish_event(db, SUBJECT, {"service": self.service, "keys": keys, "by": str(actor_id) if actor_id else None})
@@ -236,9 +242,8 @@ def runtime_settings_router(store: RuntimeStore, *, db_dependency, role: str = "
         return await store.describe(db)
 
     @router.get("/history", summary="Settings history", responses=problem_responses(401, 403))
-    async def settings_history(db: DbDep, limit: Annotated[int, Query(ge=1, le=200)] = 50) -> Page[RuntimeHistoryRead]:
+    async def settings_history(db: DbDep, pages: PageQuery) -> OffsetPage[RuntimeHistoryRead]:
         """Who changed what, newest first."""
-        rows = await store.history(db, limit=limit)
-        return Page(items=[RuntimeHistoryRead.from_model(r) for r in rows], page=PageInfo())
+        return await store.history(db, pages, transformer=RuntimeHistoryRead.from_model)
 
     return router
