@@ -52,12 +52,13 @@ class BaseRepository(Generic[M]):
         where: list | None = None,
         options: list | None = None,
         order_by: Any = None,
+        include_deleted: bool = False,
         transformer: Any = None,
     ) -> OffsetPage[Any]:
         """Numbered pages with a total, for admin tables. Same filters as `list_page`. The id is
         appended to any ordering so rows tied on the sort column keep a stable place across pages."""
         pages = pages or PageParams()
-        q = self.query()
+        q = self.query(include_deleted=include_deleted)
         for clause in where or []:
             q = q.where(clause)
         ordering = [] if order_by is None else order_by if isinstance(order_by, list) else [order_by]
