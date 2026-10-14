@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
 
@@ -10,9 +11,12 @@ Receive = Callable[[], Awaitable[Message]]
 Send = Callable[[Message], Awaitable[None]]
 
 CANCEL_METHODS = frozenset({"GET", "HEAD"})
+REQUEST_ID = re.compile(rb"[A-Za-z0-9._:-]{1,128}")
 
 
 class RequestIdMiddleware:
+    """One id per request: the caller's if it looks like an id, otherwise a new one; never two."""
+
     def __init__(self, app):
         self.app = app
 
@@ -20,14 +24,15 @@ class RequestIdMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        request_id = dict(scope.get("headers", [])).get(b"x-request-id")
-        if request_id is None:
-            request_id = str(uuid.uuid7()).encode()
-            scope["headers"] = [*scope.get("headers", []), (b"x-request-id", request_id)]
+        headers = scope.get("headers", [])
+        given = next((value for name, value in headers if name == b"x-request-id"), None)
+        request_id = given if given is not None and REQUEST_ID.fullmatch(given) else str(uuid.uuid7()).encode()
+        scope["headers"] = [*(item for item in headers if item[0] != b"x-request-id"), (b"x-request-id", request_id)]
 
         async def send_with_id(message: Message) -> None:
             if message["type"] == "http.response.start":
-                message.setdefault("headers", []).append((b"x-request-id", request_id))
+                kept = [item for item in message.get("headers", []) if item[0].lower() != b"x-request-id"]
+                message["headers"] = [*kept, (b"x-request-id", request_id)]
             await send(message)
 
         await self.app(scope, receive, send_with_id)
