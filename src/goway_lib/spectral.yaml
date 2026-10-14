@@ -1,0 +1,46 @@
+extends: [["spectral:oas", "recommended"]]
+
+rules:
+  info-contact: off
+  oas3-api-servers: off
+  operation-tag-defined: off
+  operation-operationId: error
+
+  goway-errors-are-problems:
+    description: Every 4xx and 5xx response is application/problem+json.
+    severity: error
+    given: "$.paths[*][get,put,post,patch,delete].responses[?(@property.match(/^[45]/))]"
+    then:
+      field: content
+      function: schema
+      functionOptions:
+        schema:
+          type: object
+          required: ["application/problem+json"]
+
+  goway-cursor-pagination:
+    description: /v1 and /internal lists page with a cursor, never offset or page numbers.
+    severity: error
+    given: "$.paths[?(@property.match(/^\\/(v1|internal)\\//))][*].parameters[?(@.in == 'query')].name"
+    then:
+      function: pattern
+      functionOptions:
+        notMatch: "^(offset|skip|page)$"
+
+  goway-snake-case-fields:
+    description: Field names are snake_case.
+    severity: error
+    given: "$..properties"
+    then:
+      field: "@key"
+      function: casing
+      functionOptions:
+        type: snake
+
+  goway-no-success-envelope:
+    description: A single resource is returned unwrapped, without a success flag.
+    severity: error
+    given: "$..properties"
+    then:
+      field: success
+      function: falsy

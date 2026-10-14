@@ -1,4 +1,5 @@
 import logging
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -6,7 +7,7 @@ from fastapi.responses import JSONResponse
 from opentelemetry import trace
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from goway_lib.errors import Problem, UnprocessableEntity
+from goway_lib.errors import Problem, UnprocessableEntity, problem_responses
 
 _STATUS_PROBLEMS = {
     404: ("NOT_FOUND", "Not found"),
@@ -30,7 +31,31 @@ def problem_response(request: Request, problem: Problem) -> JSONResponse:
     return JSONResponse(status_code=problem.status, content=body, media_type=PROBLEM_MEDIA)
 
 
+def _document_validation_problems(app: FastAPI) -> None:
+    """FastAPI documents 422 as its own HTTPValidationError body; the handler below sends problem+json."""
+    build = app.openapi
+
+    def openapi() -> dict[str, Any]:
+        if app.openapi_schema:
+            return app.openapi_schema
+        schema = build()
+        validation = problem_responses(422)[422]
+        for item in schema.get("paths", {}).values():
+            for operation in item.values():
+                response = operation.get("responses", {}).get("422") if isinstance(operation, dict) else None
+                if response and PROBLEM_MEDIA not in response.get("content", {}):
+                    response.update(validation)
+        components = schema.get("components", {}).get("schemas", {})
+        components.pop("HTTPValidationError", None)
+        components.pop("ValidationError", None)
+        return schema
+
+    app.openapi = openapi
+
+
 def install_handlers(app: FastAPI) -> None:
+    _document_validation_problems(app)
+
     @app.exception_handler(Problem)
     async def handle_problem(request: Request, exc: Problem) -> JSONResponse:
         return problem_response(request, exc)

@@ -49,3 +49,25 @@ def test_every_published_subject_is_stream_covered():
     prefixes = tuple(s[:-1] for s in DEFAULT_SUBJECTS if s.endswith(">"))
     uncovered = [s for s in published if not s.startswith(prefixes)]
     assert uncovered == []
+
+
+def test_validation_errors_documented_as_problems():
+    from fastapi import FastAPI
+    from pydantic import BaseModel
+
+    from goway_lib.handlers import install_handlers
+
+    class Body(BaseModel):
+        name: str
+
+    app = FastAPI()
+    install_handlers(app)
+
+    @app.post("/things")
+    async def create(body: Body) -> Body:
+        return body
+
+    schema = app.openapi()
+    assert set(schema["paths"]["/things"]["post"]["responses"]["422"]["content"]) == {"application/problem+json"}
+    assert "HTTPValidationError" not in schema["components"]["schemas"]
+    assert app.openapi() is schema
