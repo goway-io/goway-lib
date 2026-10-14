@@ -20,8 +20,10 @@ class RequestIdMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        headers = dict(scope.get("headers", []))
-        request_id = headers.get(b"x-request-id", str(uuid.uuid7()).encode())
+        request_id = dict(scope.get("headers", [])).get(b"x-request-id")
+        if request_id is None:
+            request_id = str(uuid.uuid7()).encode()
+            scope["headers"] = [*scope.get("headers", []), (b"x-request-id", request_id)]
 
         async def send_with_id(message: Message) -> None:
             if message["type"] == "http.response.start":

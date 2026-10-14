@@ -25,7 +25,7 @@ def _trace_id() -> str | None:
     return None
 
 
-def _respond(request: Request, problem: Problem) -> JSONResponse:
+def problem_response(request: Request, problem: Problem) -> JSONResponse:
     body = problem.to_dict(instance=str(request.url.path), trace_id=_trace_id())
     return JSONResponse(status_code=problem.status, content=body, media_type=PROBLEM_MEDIA)
 
@@ -33,7 +33,7 @@ def _respond(request: Request, problem: Problem) -> JSONResponse:
 def install_handlers(app: FastAPI) -> None:
     @app.exception_handler(Problem)
     async def handle_problem(request: Request, exc: Problem) -> JSONResponse:
-        return _respond(request, exc)
+        return problem_response(request, exc)
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -41,7 +41,7 @@ def install_handlers(app: FastAPI) -> None:
             {"field": ".".join(str(loc) for loc in err.get("loc", [])), "message": err.get("msg", "")}
             for err in exc.errors()
         ]
-        return _respond(request, UnprocessableEntity(errors=errors))
+        return problem_response(request, UnprocessableEntity(errors=errors))
 
     @app.exception_handler(StarletteHTTPException)
     async def handle_http_exception(request: Request, exc: StarletteHTTPException) -> JSONResponse:
@@ -49,9 +49,9 @@ def install_handlers(app: FastAPI) -> None:
         problem = Problem(str(exc.detail), code=code)
         problem.status = exc.status_code
         problem.title = title
-        return _respond(request, problem)
+        return problem_response(request, problem)
 
     @app.exception_handler(Exception)
     async def handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
         logger.exception("unhandled error on %s %s", request.method, request.url.path)
-        return _respond(request, Problem())
+        return problem_response(request, Problem())

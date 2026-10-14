@@ -1,0 +1,20 @@
+from fastapi import FastAPI, Request
+from httpx import ASGITransport, AsyncClient
+
+from goway_lib.middleware import RequestIdMiddleware
+
+
+async def test_one_request_id_is_seen_by_the_handler_and_returned_to_the_caller():
+    app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
+
+    @app.get("/seen")
+    async def seen(request: Request) -> dict:
+        return {"id": request.headers.get("x-request-id")}
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        minted = await client.get("/seen")
+        given = await client.get("/seen", headers={"X-Request-Id": "abc-123"})
+
+    assert minted.json()["id"] and minted.json()["id"] == minted.headers["x-request-id"]
+    assert (given.json()["id"], given.headers["x-request-id"]) == ("abc-123", "abc-123")
