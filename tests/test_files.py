@@ -66,6 +66,9 @@ class MemoryStorage(Storage):
             raise ConnectionError("storage down")
         self.objects.pop((bucket, key), None)
 
+    async def copy(self, source_bucket, key, target_bucket):
+        self.objects[(target_bucket, key)] = self.objects[(source_bucket, key)]
+
 
 @pytest.fixture
 async def db():
@@ -299,3 +302,35 @@ async def test_router_upload_complete_get_and_delete(db, storage):
         assert (await client.get(f"/v1/files/{file_id}", headers=headers)).json()["name"] == "a.jpg"
         assert (await client.delete(f"/v1/files/{file_id}", headers=headers)).status_code == 204
         assert (await client.get(f"/v1/files/{file_id}", headers=headers)).status_code == 404
+
+
+async def test_a_public_file_reaches_the_public_bucket_only_after_its_check(files, storage):
+    good = await uploaded(files, storage, kind="reference_image")
+    bad = await uploaded(files, storage, kind="reference_image", body=b"<svg>" + b"\0" * 95)
+
+    assert (good.bucket, bad.bucket) == ("m", "m"), "uploads land in the media bucket, not where anyone can read"
+    assert str(ORG) not in good.key
+
+    await files.complete(good.id, ORG)
+    await files.complete(bad.id, ORG)
+
+    assert good.status == FileStatus.READY and good.bucket == "pub"
+    assert storage.objects.get(("pub", good.key)) == JPEG and ("m", good.key) not in storage.objects
+    assert bad.status == FileStatus.REJECTED and ("pub", bad.key) not in storage.objects
+    assert files.ref(good).url == f"https://storage.example.uz/pub/{good.key}"
+
+
+async def test_files_of_a_kind_that_became_public_are_moved_there(files, storage, db):
+    old = await uploaded(files, storage, kind="avatar")
+    await files.complete(old.id, ORG)
+    assert old.bucket == "m" and files.ref(old).expires_at is not None
+
+    public = FileService(
+        db, storage, {**KINDS, "avatar": FileKind("avatar", StorageClass.PUBLIC, 5_000, IMAGE_TYPES)}, service="auth"
+    )
+    assert await public.move_to_declared_class("avatar") == 1
+    assert await public.move_to_declared_class("avatar") == 0
+
+    assert (old.bucket, old.storage_class) == ("pub", StorageClass.PUBLIC)
+    assert storage.objects.get(("pub", old.key)) == JPEG and ("m", old.key) not in storage.objects
+    assert public.ref(old).expires_at is None

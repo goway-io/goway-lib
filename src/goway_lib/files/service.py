@@ -6,6 +6,10 @@
 
 Storage is only touched outside the database transaction's critical path: a failed delete is
 logged and retried by the next sweep instead of failing the request that caused it.
+
+A public file is uploaded into the media bucket first and copied to the public bucket only once the content
+check passes, so bytes nobody has checked are never served to the world, and a browser upload meets the
+media bucket's CORS rules. Its key carries no org id, because the address is public.
 """
 
 import logging
@@ -104,8 +108,10 @@ class FileService:
             )
         now = now_utc()
         file_id = uuid.uuid7()
-        bucket = self.storage.bucket(spec.storage_class)
-        key = f"{self.service}/{spec.code}/{org_id}/{now:%Y/%m}/{file_id}"
+        public = spec.storage_class is StorageClass.PUBLIC
+        bucket = self.storage.bucket(StorageClass.MEDIA if public else spec.storage_class)
+        owner = "" if public else f"{org_id}/"
+        key = f"{self.service}/{spec.code}/{owner}{now:%Y/%m}/{file_id}"
         self.db.add(
             FileRecord(
                 id=file_id,
@@ -160,11 +166,45 @@ class FileService:
             record.status = FileStatus.REJECTED
             record.reject_reason = reason
         else:
+            await self._place(record, record.storage_class)
             record.status = FileStatus.READY
             record.detected_type = detected
             record.uploaded_at = record.ready_at = now
         await self.db.flush()
         return record
+
+    async def _place(self, record: FileRecord, storage_class: StorageClass) -> None:
+        """Moves the object into the bucket of its class; the old copy goes only after the new one exists."""
+        target = self.storage.bucket(storage_class)
+        if record.bucket != target:
+            source = record.bucket
+            await self._storage(self.storage.copy(source, record.key, target))
+            record.bucket = target
+            try:
+                await self.storage.delete(source, record.key)
+            except STORAGE_ERRORS:
+                logger.warning("could not remove %s/%s after moving it", source, record.key, exc_info=True)
+        record.storage_class = storage_class
+
+    async def move_to_declared_class(self, kind: str, *, limit: int = 500) -> int:
+        """For a kind whose storage class changed: moves its ready files where the kind now says they live."""
+        spec = self.kind(kind)
+        query = (
+            select(FileRecord)
+            .where(
+                FileRecord.kind == spec.code,
+                FileRecord.status == FileStatus.READY,
+                FileRecord.storage_class != spec.storage_class,
+            )
+            .order_by(FileRecord.created_at)
+            .limit(limit)
+        )
+        moved = 0
+        for record in (await self.db.execute(query)).scalars().all():
+            await self._place(record, spec.storage_class)
+            moved += 1
+        await self.db.flush()
+        return moved
 
     async def attach(self, file_id: uuid.UUID, org_id: uuid.UUID, *, kinds: Iterable[str]) -> FileRecord:
         """Counts one more domain reference to the file. Completes a pending upload on the way, so a

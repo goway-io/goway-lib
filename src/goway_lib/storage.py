@@ -137,6 +137,10 @@ class Storage:
             async with response["Body"] as body:
                 return await body.read()
 
+    async def copy(self, source_bucket: str, key: str, target_bucket: str) -> None:
+        async with self._client() as s3:
+            await s3.copy_object(Bucket=target_bucket, Key=key, CopySource={"Bucket": source_bucket, "Key": key})
+
     async def delete(self, bucket: str, key: str) -> None:
         """Removes every version, so a delete on the versioned private bucket really frees the data."""
         async with self._client() as s3:
