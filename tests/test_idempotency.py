@@ -1,12 +1,14 @@
+import asyncio
+import json
 import uuid
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel
 
 from goway_lib import idempotency
-from goway_lib.auth import configure_auth, mint_access_token
+from goway_lib.auth import configure_auth, mint_access_token, sign_identity
 from goway_lib.errors import Conflict
 from goway_lib.handlers import install_handlers
 from goway_lib.idempotency import IdempotencyMiddleware
@@ -67,9 +69,30 @@ async def api(redis):
             raise Conflict("No", code="CARGO_REFUSED")
         return {"number": app.state.runs, "cargo": order.cargo}
 
+    @app.post("/receipts", status_code=201)
+    async def receipt():
+        app.state.runs += 1
+        content = b"%PDF-\xff\xfe" + bytes([app.state.runs])
+        response = Response(content=content, status_code=201, media_type="application/pdf")
+        response.headers["Location"] = f"/receipts/{app.state.runs}"
+        response.set_cookie("access", "a")
+        response.set_cookie("refresh", "r")
+        return response
+
+    @app.post("/tokens")
+    async def tokens(response: Response):
+        app.state.runs += 1
+        response.headers["Cache-Control"] = "no-store"
+        return {"access_token": f"t{app.state.runs}"}
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         client.app = app
         yield client
+
+
+def identity(user_id):
+    raw, sig = sign_identity({"sub": str(user_id), "org": str(uuid.uuid7()), "role": "shipper", "iat": 0})
+    return {"X-Internal-Identity": raw, "X-Internal-Signature": sig}
 
 
 def bearer(user_id, rv=1):
@@ -141,3 +164,88 @@ async def test_redis_being_down_never_fails_the_request(api, redis):
     response = await api.post("/orders", json={"cargo": "apples"}, headers={"Idempotency-Key": "k1"})
 
     assert response.status_code == 201 and api.app.state.runs == 1
+
+
+async def test_callers_named_by_the_edge_identity_are_told_apart(api):
+    headers = {"Idempotency-Key": "k1"}
+    mine = await api.post("/orders", json={"cargo": "apples"}, headers={**identity(uuid.uuid7()), **headers})
+    theirs = await api.post("/orders", json={"cargo": "apples"}, headers={**identity(uuid.uuid7()), **headers})
+
+    assert (mine.json()["number"], theirs.json()["number"]) == (1, 2)
+    assert "Idempotency-Replayed" not in theirs.headers
+
+
+async def test_the_same_json_written_differently_is_the_same_request(api):
+    headers = {**bearer(uuid.uuid7()), "Idempotency-Key": "k1", "Content-Type": "application/json"}
+    first = await api.post("/orders", content='{"cargo": "apples"}', headers=headers)
+    again = await api.post("/orders", content='{"cargo":"apples"}', headers=headers)
+
+    assert again.json() == first.json() and api.app.state.runs == 1
+
+
+async def test_another_body_while_the_first_still_runs_is_refused_not_told_to_wait(api, redis):
+    headers = {**bearer(uuid.uuid7()), "Idempotency-Key": "k1"}
+    await api.post("/orders", json={"cargo": "apples"}, headers=headers)
+    [skey] = redis.data
+    redis.data[skey] = json.dumps({"state": idempotency.PENDING, "fingerprint": "something else"})
+
+    other = await api.post("/orders", json={"cargo": "apples"}, headers=headers)
+
+    assert other.status_code == 422 and other.json()["code"] == "IDEMPOTENCY_KEY_REUSED"
+
+
+async def test_a_binary_answer_comes_back_byte_for_byte_with_its_headers(api):
+    headers = {**bearer(uuid.uuid7()), "Idempotency-Key": "k1"}
+    first = await api.post("/receipts", headers=headers)
+    again = await api.post("/receipts", headers=headers)
+
+    assert first.status_code == again.status_code == 201
+    assert again.content == first.content and again.headers["content-type"] == "application/pdf"
+    assert again.headers["location"] == "/receipts/1"
+    assert len(first.headers.get_list("set-cookie")) == len(again.headers.get_list("set-cookie")) == 2
+    assert api.app.state.runs == 1
+
+
+async def test_a_no_store_answer_is_never_kept(api, redis):
+    headers = {"Idempotency-Key": "k1"}
+    first = await api.post("/tokens", json={"phone": "+998901234567"}, headers=headers)
+    again = await api.post("/tokens", json={"phone": "+998901234567"}, headers=headers)
+
+    assert (first.json()["access_token"], again.json()["access_token"]) == ("t1", "t2")
+    assert redis.data == {}
+
+
+async def test_a_signed_token_with_broken_claims_is_treated_as_no_token(api):
+    import jwt
+
+    broken = jwt.encode({"sub": str(uuid.uuid7())}, SECRET, algorithm="HS256")
+    response = await api.post(
+        "/orders", json={"cargo": "apples"}, headers={"Authorization": f"Bearer {broken}", "Idempotency-Key": "k1"}
+    )
+
+    assert response.status_code == 201
+
+
+async def test_a_record_written_before_this_format_still_replays(api, redis):
+    headers = {"Idempotency-Key": "k1"}
+    await api.post("/orders", json={"cargo": "apples"}, headers=headers)
+    [skey] = redis.data
+    old = {"status": 201, "media_type": "application/json", "body": '{"number": 7}', "fingerprint": None}
+    old["fingerprint"] = json.loads(redis.data[skey])["fingerprint"]
+    redis.data[skey] = json.dumps(old)
+
+    again = await api.post("/orders", json={"cargo": "apples"}, headers=headers)
+
+    assert again.json() == {"number": 7} and again.headers["content-type"] == "application/json"
+
+
+async def test_a_slow_redis_does_not_slow_the_request(api, redis):
+    async def stuck(*args, **kwargs):
+        await asyncio.sleep(5)
+
+    redis.set = stuck
+    response = await asyncio.wait_for(
+        api.post("/orders", json={"cargo": "apples"}, headers={"Idempotency-Key": "k1"}), timeout=2
+    )
+
+    assert response.status_code == 201

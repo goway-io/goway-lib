@@ -77,16 +77,24 @@ def mint_access_token(*, user_id: uuid.UUID, org_id: uuid.UUID, role: str, role_
     return jwt.encode(payload, _jwt_secret, algorithm="HS256")
 
 
+def _invalid_token() -> Unauthorized:
+    return Unauthorized("Invalid token", code="TOKEN_INVALID", key="auth.token_invalid")
+
+
 def _actor_from_claims(claims: dict) -> Actor:
-    rid = claims.get("rid")
-    return Actor(
-        user_id=uuid.UUID(claims["sub"]),
-        org_id=uuid.UUID(claims["org"]),
-        role=claims["role"],
-        role_id=uuid.UUID(rid) if rid else None,
-        rv=int(claims.get("rv", 0)),
-        iat=int(claims["iat"]),
-    )
+    """A correctly signed token with missing or malformed claims is as invalid as a forged one."""
+    try:
+        rid = claims.get("rid")
+        return Actor(
+            user_id=uuid.UUID(claims["sub"]),
+            org_id=uuid.UUID(claims["org"]),
+            role=claims["role"],
+            role_id=uuid.UUID(rid) if rid else None,
+            rv=int(claims.get("rv", 0)),
+            iat=int(claims["iat"]),
+        )
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise _invalid_token() from exc
 
 
 def verify_access_token(token: str) -> Actor:
@@ -94,8 +102,8 @@ def verify_access_token(token: str) -> Actor:
         claims = jwt.decode(token, _jwt_secret, algorithms=["HS256"])
     except jwt.ExpiredSignatureError as exc:
         raise Unauthorized("Token expired", code="TOKEN_EXPIRED", key="auth.token_expired") from exc
-    except jwt.InvalidTokenError as exc:
-        raise Unauthorized("Invalid token", code="TOKEN_INVALID", key="auth.token_invalid") from exc
+    except jwt.PyJWTError as exc:
+        raise _invalid_token() from exc
     return _actor_from_claims(claims)
 
 
@@ -126,19 +134,28 @@ def _verify_identity_header(raw: str, sig: str) -> Actor:
     expected = hmac.new(_identity_secret.encode(), raw.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(sig, expected):
         raise Unauthorized("Invalid identity signature", code="IDENTITY_INVALID")
-    return _actor_from_claims(json.loads(raw))
+    try:
+        claims = json.loads(raw)
+    except ValueError as exc:
+        raise Unauthorized("Invalid identity signature", code="IDENTITY_INVALID") from exc
+    return _actor_from_claims(claims)
+
+
+def actor_from_headers(headers) -> tuple[Actor, bool]:
+    """Who sent the request, by either entry path; the flag says whether staleness is still to be checked."""
+    identity = headers.get(IDENTITY_HEADER)
+    if identity:
+        return _verify_identity_header(identity, headers.get(IDENTITY_SIG_HEADER, "")), False
+    auth = headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        raise Unauthorized("Missing credentials", code="TOKEN_MISSING", key="auth.token_missing")
+    return verify_access_token(auth.removeprefix("Bearer ")), True
 
 
 async def current_actor(request: Request) -> Actor:
-    identity = request.headers.get(IDENTITY_HEADER)
-    if identity:
-        sig = request.headers.get(IDENTITY_SIG_HEADER, "")
-        return _verify_identity_header(identity, sig)
-    auth = request.headers.get("authorization", "")
-    if not auth.startswith("Bearer "):
-        raise Unauthorized("Missing credentials", code="TOKEN_MISSING", key="auth.token_missing")
-    actor = verify_access_token(auth.removeprefix("Bearer "))
-    await enforce_staleness(actor)
+    actor, check_staleness = actor_from_headers(request.headers)
+    if check_staleness:
+        await enforce_staleness(actor)
     return actor
 
 
