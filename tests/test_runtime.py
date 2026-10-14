@@ -1,3 +1,4 @@
+import time
 import uuid
 
 import pytest
@@ -67,6 +68,30 @@ async def test_cache_serves_within_ttl(maker):
         assert (await store.current(db)).free_minutes == 30
         store._cached = None
         assert (await store.current(db)).free_minutes == 30
+
+
+async def test_a_read_racing_an_uncommitted_change_does_not_keep_the_old_values(maker):
+    store = RuntimeStore(Tunables, service="loads", ttl=60)
+    async with maker() as db:
+        await store.update(db, {"free_minutes": 40}, actor_id=None)
+        store._cached, store._cached_at = Tunables(), time.monotonic()
+        await db.commit()
+        assert (await store.current(db)).free_minutes == 40
+
+
+async def test_a_read_that_spans_an_invalidation_is_not_cached(maker, monkeypatch):
+    store = RuntimeStore(Tunables, service="loads", ttl=60)
+    read = store._overrides
+
+    async def overtaken(db):
+        rows = await read(db)
+        store.invalidate()
+        return rows
+
+    async with maker() as db:
+        monkeypatch.setattr(store, "_overrides", overtaken)
+        await store.current(db)
+        assert store._cached is None
 
 
 async def test_admin_router_validates_bounds_and_role(maker):

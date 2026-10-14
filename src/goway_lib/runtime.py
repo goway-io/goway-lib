@@ -6,7 +6,7 @@ from typing import Annotated, Any, Generic, TypeVar
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field, create_model
-from sqlalchemy import JSON, String, func, select
+from sqlalchemy import JSON, String, event, func, select
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
@@ -97,10 +97,17 @@ class RuntimeStore(Generic[S]):
         self.ttl = ttl
         self._cached: S | None = None
         self._cached_at = 0.0
+        self._generation = 0
 
     def invalidate(self) -> None:
         self._cached = None
         self._cached_at = 0.0
+        self._generation += 1
+
+    def _invalidate_on_commit(self, db: AsyncSession) -> None:
+        """A request that read the old rows while the change was uncommitted must not keep them for a TTL."""
+        self.invalidate()
+        event.listen(db.sync_session, "after_commit", lambda _session: self.invalidate(), once=True)
 
     async def _overrides(self, db: AsyncSession) -> dict[str, Any]:
         rows = (await db.execute(select(RuntimeSetting))).scalars().all()
@@ -126,13 +133,16 @@ class RuntimeStore(Generic[S]):
     async def current(self, db: AsyncSession) -> S:
         if self._cached is not None and time.monotonic() - self._cached_at < self.ttl:
             return self._cached
+        generation = self._generation
         value = self._merge(await self._overrides(db))
-        self._cached, self._cached_at = value, time.monotonic()
+        if generation == self._generation:
+            self._cached, self._cached_at = value, time.monotonic()
         return value
 
     async def describe(self, db: AsyncSession) -> RuntimeSettingsRead:
+        """Read past the cache: the admin sees what is stored, including their own uncommitted change."""
         overrides = await self._overrides(db)
-        current = await self.current(db)
+        current = self._merge(overrides)
         fields = []
         for name, info in self.schema.model_fields.items():
             fields.append(
@@ -165,7 +175,7 @@ class RuntimeStore(Generic[S]):
         await db.flush()
         db.expire_all()
         self._announce(db, list(changes), actor_id)
-        self.invalidate()
+        self._invalidate_on_commit(db)
         return merged
 
     async def reset(self, db: AsyncSession, key: str, *, actor_id: uuid.UUID | None) -> S:
@@ -177,8 +187,8 @@ class RuntimeStore(Generic[S]):
             await db.delete(row)
             await db.flush()
             self._announce(db, [key], actor_id)
-        self.invalidate()
-        return await self.current(db)
+        self._invalidate_on_commit(db)
+        return self._merge(await self._overrides(db))
 
     @staticmethod
     def _upsert(db: AsyncSession, key: str, value: Any, actor_id: uuid.UUID | None):
