@@ -1,3 +1,5 @@
+import json
+
 from goway_lib.errors import Conflict, NotFound, or_404, problem_responses
 
 
@@ -71,3 +73,37 @@ def test_validation_errors_documented_as_problems():
     assert set(schema["paths"]["/things"]["post"]["responses"]["422"]["content"]) == {"application/problem+json"}
     assert "HTTPValidationError" not in schema["components"]["schemas"]
     assert app.openapi() is schema
+
+
+def test_webhooks_callbacks_and_a_model_called_validation_error_survive_the_rewrite():
+    from fastapi import APIRouter, FastAPI
+    from pydantic import BaseModel
+
+    from goway_lib.handlers import install_handlers
+
+    class ValidationError(BaseModel):
+        rule: str
+
+    class Body(BaseModel):
+        name: str
+        check: ValidationError | None = None
+
+    app = FastAPI()
+    install_handlers(app)
+    hooks = APIRouter()
+
+    @hooks.post("{$callback_url}/done")
+    def done(body: Body) -> None: ...
+
+    @app.webhooks.post("load-booked")
+    def booked(body: Body) -> None: ...
+
+    @app.post("/things", callbacks=hooks.routes)
+    async def create(body: Body) -> Body:
+        return body
+
+    schema = app.openapi()
+    text = json.dumps(schema)
+    assert "HTTPValidationError" not in text
+    assert "ValidationError" in schema["components"]["schemas"]
+    assert set(schema["webhooks"]["load-booked"]["post"]["responses"]["422"]["content"]) == {"application/problem+json"}

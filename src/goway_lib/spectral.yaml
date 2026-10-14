@@ -7,9 +7,9 @@ rules:
   operation-operationId: error
 
   goway-errors-are-problems:
-    description: Every 4xx and 5xx response is application/problem+json.
+    description: Every 4xx, 5xx and default response is application/problem+json and nothing else.
     severity: error
-    given: "$.paths[*][get,put,post,patch,delete].responses[?(@property.match(/^[45]/))]"
+    given: "$.paths[*][get,put,post,patch,delete,head,options,trace].responses[?(@property.match(/^([45]|default)/))]"
     then:
       field: content
       function: schema
@@ -17,22 +17,33 @@ rules:
         schema:
           type: object
           required: ["application/problem+json"]
+          propertyNames:
+            const: application/problem+json
 
   goway-cursor-pagination:
-    description: /v1 and /internal lists page with a cursor, never offset or page numbers.
+    description: /v1 and /internal lists page with a cursor, never offsets or page numbers.
     severity: error
-    given: "$.paths[?(@property.match(/^\\/(v1|internal)\\//))][*].parameters[?(@.in == 'query')].name"
+    given: "$.paths[?(@property.match(/^\\/(v1|internal)\\//))]..parameters[?(@.in == 'query')].name"
     then:
       function: pattern
       functionOptions:
-        notMatch: "^(offset|skip|page)$"
+        notMatch: "^(offset|skip|page|page_number|page_size|per_page|start)$"
 
   goway-snake-case-fields:
     description: Field names are snake_case.
     severity: error
-    given: "$..properties"
+    given: "$..[?(@ && @.type === 'object' && @.properties)].properties"
     then:
       field: "@key"
+      function: casing
+      functionOptions:
+        type: snake
+
+  goway-snake-case-parameters:
+    description: Query and path parameter names are snake_case.
+    severity: error
+    given: "$.paths..parameters[?(@.in == 'query' || @.in == 'path')].name"
+    then:
       function: casing
       functionOptions:
         type: snake
@@ -40,7 +51,7 @@ rules:
   goway-no-success-envelope:
     description: A single resource is returned unwrapped, without a success flag.
     severity: error
-    given: "$..properties"
+    given: "$..[?(@ && @.type === 'object' && @.properties)].properties"
     then:
       field: success
       function: falsy

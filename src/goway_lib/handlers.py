@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import Any
 
@@ -31,6 +32,25 @@ def problem_response(request: Request, problem: Problem) -> JSONResponse:
     return JSONResponse(status_code=problem.status, content=body, media_type=PROBLEM_MEDIA)
 
 
+_FASTAPI_VALIDATION = "#/components/schemas/HTTPValidationError"
+
+
+def _rewrite_validation_responses(node: Any, validation: dict) -> None:
+    """Paths, webhooks and callbacks all nest responses; any 422 FastAPI described its own way is replaced."""
+    if isinstance(node, list):
+        for item in node:
+            _rewrite_validation_responses(item, validation)
+        return
+    if not isinstance(node, dict):
+        return
+    response = node.get("responses", {}).get("422") if isinstance(node.get("responses"), dict) else None
+    if isinstance(response, dict) and PROBLEM_MEDIA not in response.get("content", {}):
+        response.clear()
+        response.update(validation)
+    for value in node.values():
+        _rewrite_validation_responses(value, validation)
+
+
 def _document_validation_problems(app: FastAPI) -> None:
     """FastAPI documents 422 as its own HTTPValidationError body; the handler below sends problem+json."""
     build = app.openapi
@@ -39,15 +59,15 @@ def _document_validation_problems(app: FastAPI) -> None:
         if app.openapi_schema:
             return app.openapi_schema
         schema = build()
-        validation = problem_responses(422)[422]
-        for item in schema.get("paths", {}).values():
-            for operation in item.values():
-                response = operation.get("responses", {}).get("422") if isinstance(operation, dict) else None
-                if response and PROBLEM_MEDIA not in response.get("content", {}):
-                    response.update(validation)
+        _rewrite_validation_responses(
+            {k: v for k, v in schema.items() if k != "components"}, problem_responses(422)[422]
+        )
         components = schema.get("components", {}).get("schemas", {})
-        components.pop("HTTPValidationError", None)
-        components.pop("ValidationError", None)
+        if _FASTAPI_VALIDATION not in json.dumps({k: v for k, v in schema.items() if k != "components"}):
+            components.pop("HTTPValidationError", None)
+            fastapi_item = {"loc", "msg", "type"} <= set(components.get("ValidationError", {}).get("properties", {}))
+            if fastapi_item and "#/components/schemas/ValidationError" not in json.dumps(components):
+                components.pop("ValidationError", None)
         return schema
 
     app.openapi = openapi
