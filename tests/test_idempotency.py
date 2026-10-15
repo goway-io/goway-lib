@@ -8,7 +8,7 @@ from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel
 
 from goway_lib import idempotency
-from goway_lib.auth import configure_auth, mint_access_token, sign_identity
+from goway_lib.auth import configure_auth, mint_access_token
 from goway_lib.errors import Conflict
 from goway_lib.handlers import install_handlers
 from goway_lib.idempotency import IdempotencyMiddleware
@@ -90,11 +90,6 @@ async def api(redis):
         yield client
 
 
-def identity(user_id):
-    raw, sig = sign_identity({"sub": str(user_id), "org": str(uuid.uuid7()), "role": "shipper", "iat": 0})
-    return {"X-Internal-Identity": raw, "X-Internal-Signature": sig}
-
-
 def bearer(user_id, rv=1):
     token = mint_access_token(user_id=user_id, org_id=uuid.uuid7(), role="shipper", role_id=uuid.uuid7(), rv=rv)
     return {"Authorization": f"Bearer {token}"}
@@ -166,10 +161,10 @@ async def test_redis_being_down_never_fails_the_request(api, redis):
     assert response.status_code == 201 and api.app.state.runs == 1
 
 
-async def test_callers_named_by_the_edge_identity_are_told_apart(api):
+async def test_two_callers_with_the_same_key_are_told_apart(api):
     headers = {"Idempotency-Key": "k1"}
-    mine = await api.post("/orders", json={"cargo": "apples"}, headers={**identity(uuid.uuid7()), **headers})
-    theirs = await api.post("/orders", json={"cargo": "apples"}, headers={**identity(uuid.uuid7()), **headers})
+    mine = await api.post("/orders", json={"cargo": "apples"}, headers={**bearer(uuid.uuid7()), **headers})
+    theirs = await api.post("/orders", json={"cargo": "apples"}, headers={**bearer(uuid.uuid7()), **headers})
 
     assert (mine.json()["number"], theirs.json()["number"]) == (1, 2)
     assert "Idempotency-Replayed" not in theirs.headers

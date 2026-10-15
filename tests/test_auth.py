@@ -8,7 +8,6 @@ from goway_lib.auth import (
     enforce_staleness,
     mint_access_token,
     role_version_key,
-    sign_identity,
     user_revocation_key,
     verify_access_token,
 )
@@ -82,10 +81,3 @@ async def test_staleness_fails_open():
     configure_auth(jwt_secret=SECRET, staleness_redis=BrokenRedis())
     await enforce_staleness(make_actor(uuid.uuid7()))
     configure_auth(jwt_secret=SECRET)
-
-
-def test_identity_signing_stable():
-    configure_auth(jwt_secret=SECRET)
-    raw, sig = sign_identity({"sub": "x", "org": "y", "role": "driver", "iat": 1, "rv": 0})
-    raw2, sig2 = sign_identity({"rv": 0, "iat": 1, "role": "driver", "org": "y", "sub": "x"})
-    assert raw == raw2 and sig == sig2

@@ -46,7 +46,7 @@ def _fingerprint(body: bytes) -> str:
 
 def _caller(request: Request, fingerprint: str) -> str:
     try:
-        actor, _ = actor_from_headers(request.headers)
+        actor = actor_from_headers(request.headers)
     except Unauthorized:
         return f"body:{fingerprint}"
     return f"user:{actor.user_id}"

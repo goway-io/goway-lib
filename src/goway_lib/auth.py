@@ -1,19 +1,13 @@
 """Auth dependencies shared by every service.
 
-Two entry paths resolve to the same Actor:
-  1. X-Internal-Identity — HMAC-signed header injected by the edge; staleness
-     was already enforced there.
-  2. Authorization: Bearer — direct access-token verification. Until the edge
-     ships this path also enforces the two staleness checks (role rv, per-user
-     revocation) against Redis, failing OPEN — Redis is never a hard auth
-     dependency.
+Every service checks the caller's own access token (`Authorization: Bearer`); the edge passes it through and
+decides nothing (ADR-010). The check enforces the two staleness rules too (role rv, per-user revocation) against
+Redis, failing OPEN: Redis is never a hard auth dependency.
 
 Access tokens are HS256 JWTs: sub, org, role, rid, rv, iat, exp.
 """
 
-import hashlib
 import hmac
-import json
 import logging
 import uuid
 from dataclasses import dataclass
@@ -28,8 +22,6 @@ from goway_lib.timeutils import unix_ts
 
 logger = logging.getLogger(__name__)
 
-IDENTITY_HEADER = "x-internal-identity"
-IDENTITY_SIG_HEADER = "x-internal-signature"
 ACCESS_TOKEN_TTL_SECONDS = 10 * 60
 
 
@@ -52,14 +44,12 @@ class Actor:
 
 
 _jwt_secret: str = ""
-_identity_secret: str = ""
 _staleness_redis: Redis | None = None
 
 
-def configure_auth(*, jwt_secret: str, identity_secret: str = "", staleness_redis: Redis | None = None) -> None:
-    global _jwt_secret, _identity_secret, _staleness_redis
+def configure_auth(*, jwt_secret: str, staleness_redis: Redis | None = None) -> None:
+    global _jwt_secret, _staleness_redis
     _jwt_secret = jwt_secret
-    _identity_secret = identity_secret or jwt_secret
     _staleness_redis = staleness_redis
 
 
@@ -124,38 +114,17 @@ async def enforce_staleness(actor: Actor) -> None:
         logger.warning("staleness check failed open: %s", exc)
 
 
-def sign_identity(payload: dict) -> tuple[str, str]:
-    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-    sig = hmac.new(_identity_secret.encode(), raw.encode(), hashlib.sha256).hexdigest()
-    return raw, sig
-
-
-def _verify_identity_header(raw: str, sig: str) -> Actor:
-    expected = hmac.new(_identity_secret.encode(), raw.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(sig, expected):
-        raise Unauthorized("Invalid identity signature", code="IDENTITY_INVALID")
-    try:
-        claims = json.loads(raw)
-    except ValueError as exc:
-        raise Unauthorized("Invalid identity signature", code="IDENTITY_INVALID") from exc
-    return _actor_from_claims(claims)
-
-
-def actor_from_headers(headers) -> tuple[Actor, bool]:
-    """Who sent the request, by either entry path; the flag says whether staleness is still to be checked."""
-    identity = headers.get(IDENTITY_HEADER)
-    if identity:
-        return _verify_identity_header(identity, headers.get(IDENTITY_SIG_HEADER, "")), False
+def actor_from_headers(headers) -> Actor:
+    """Who sent the request, from their access token; staleness is the caller's to check."""
     auth = headers.get("authorization", "")
     if not auth.startswith("Bearer "):
         raise Unauthorized("Missing credentials", code="TOKEN_MISSING", key="auth.token_missing")
-    return verify_access_token(auth.removeprefix("Bearer ")), True
+    return verify_access_token(auth.removeprefix("Bearer "))
 
 
 async def current_actor(request: Request) -> Actor:
-    actor, check_staleness = actor_from_headers(request.headers)
-    if check_staleness:
-        await enforce_staleness(actor)
+    actor = actor_from_headers(request.headers)
+    await enforce_staleness(actor)
     return actor
 
 
