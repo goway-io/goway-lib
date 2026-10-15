@@ -86,13 +86,27 @@ async def _publish_one(session_factory: async_sessionmaker, event_id: uuid.UUID,
         logger.exception("outbox mark-published failed for %s (relay will republish)", event_id)
 
 
+def _released(session: Session) -> list[OutboxEvent]:
+    """The events a commit lets go of. Releasing a savepoint fires `after_commit` too, while the transaction around
+    it can still roll back, so only the outermost commit lets them go."""
+    if session.in_nested_transaction():
+        return []
+    return session.info.pop(_STAGED_KEY, [])
+
+
+def _dropped(session: Session) -> None:
+    """Any rollback, a savepoint's too, forgets every staged event: those inside it never happened, and those
+    before it the relay still publishes from their rows once the transaction commits."""
+    session.info.pop(_STAGED_KEY, None)
+
+
 def register_outbox_listeners(session_factory: async_sessionmaker) -> None:
     """Session events fire on the SYNC Session class that AsyncSession proxies —
     binding them to AsyncSession raises InvalidRequestError at boot."""
 
     @event.listens_for(Session, "after_commit")
     def _fast_path(session) -> None:
-        staged = session.info.pop(_STAGED_KEY, [])
+        staged = _released(session)
         if not staged:
             return
         try:
@@ -104,9 +118,7 @@ def register_outbox_listeners(session_factory: async_sessionmaker) -> None:
             _INFLIGHT.add(task)
             task.add_done_callback(_INFLIGHT.discard)
 
-    @event.listens_for(Session, "after_rollback")
-    def _drop(session) -> None:
-        session.info.pop(_STAGED_KEY, None)
+    event.listen(Session, "after_rollback", _dropped)
 
 
 async def relay_once(session_factory: async_sessionmaker) -> int:
