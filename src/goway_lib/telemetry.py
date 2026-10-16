@@ -16,12 +16,22 @@ logger = logging.getLogger(__name__)
 SECRET_IN_PATH = re.compile(r"(/t/|/tracking/)[^/?#\s\"]+")
 
 
+def scrub(value: object) -> object:
+    if value is None or isinstance(value, (int, float)):
+        return value
+    text = str(value)
+    redacted = SECRET_IN_PATH.sub(r"\1***", text)
+    return value if redacted == text else redacted
+
+
 class RedactFilter(logging.Filter):
+    """Scrubs the message and each argument in place: uvicorn's access formatter unpacks `args` by position, so
+    they stay a tuple of the same length; httpx passes the URL as an object, so an argument is read as text."""
+
     def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
-        redacted = SECRET_IN_PATH.sub(r"\1***", message)
-        if redacted != message:
-            record.msg, record.args = redacted, None
+        record.msg = scrub(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(scrub(arg) for arg in record.args)
         return True
 
 
