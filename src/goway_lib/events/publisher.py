@@ -12,6 +12,9 @@ _js: JetStreamContext | None = None
 
 STREAM = "GOWAY"
 
+#: How long the stream keeps an event. Consumers ack within seconds; the window is for a worker that is down, and a
+#: week covers a long weekend with room to spare. goway-lib-rs keeps the same value, or the two would fight over it.
+STREAM_MAX_AGE_SECONDS = 7 * 86_400
 
 CONNECT_TIMEOUT_SECONDS = 5.0
 
@@ -49,13 +52,14 @@ async def connect(nats_url: str, *, subjects: list[str] | None = None) -> None:
         info = await _js.stream_info(STREAM)
         current = list(info.config.subjects or [])
         merged = sorted(set(current) | set(desired))
-        if merged != sorted(current):
+        if merged != sorted(current) or info.config.max_age != STREAM_MAX_AGE_SECONDS:
             info.config.subjects = merged
+            info.config.max_age = STREAM_MAX_AGE_SECONDS
             await _js.update_stream(info.config)
-            logger.info("stream %s subjects extended to %s", STREAM, merged)
+            logger.info("stream %s set to %s, kept %ss", STREAM, merged, STREAM_MAX_AGE_SECONDS)
     except Exception:
         try:
-            await _js.add_stream(name=STREAM, subjects=desired)
+            await _js.add_stream(name=STREAM, subjects=desired, max_age=STREAM_MAX_AGE_SECONDS)
         except Exception:
             logger.warning("stream %s neither inspectable nor creatable", STREAM)
 
