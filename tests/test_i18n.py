@@ -74,6 +74,12 @@ def test_transliteration_rules():
         assert to_cyrillic(latin) == cyrillic
 
 
+def test_product_names_keep_their_latin_spelling():
+    assert to_cyrillic("GoWay ilovasi orqali Payme bilan to'lang") == "GoWay иловаси орқали Payme билан тўланг"
+    assert to_cyrillic("Google Firebase Cloud Messaging, Yandex") == "Google Firebase Cloud Messaging, Yandex"
+    assert to_cyrillic("Eskizlar") == "Эскизлар", "a name inside a longer word is spelled by the rules"
+
+
 def test_transliteration_overrides_win():
     t = Transliterator(overrides={"sement": "цемент"})
     assert t.convert("sement") == "цемент"

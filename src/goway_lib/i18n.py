@@ -163,6 +163,25 @@ _SINGLES = {
 }
 _SINGLES |= {k.upper(): v.upper() for k, v in _SINGLES.items()}
 
+#: Product and company names keep their Latin spelling in Cyrillic text, as they are printed; the letter rules would
+#: turn GoWay into «ГоWай» and Google into «Гоогле».
+LATIN_NAMES = (
+    "GoWay",
+    "Payme",
+    "Click",
+    "Uzum",
+    "Eskiz",
+    "Google",
+    "Firebase",
+    "Cloud Messaging",
+    "Yandex",
+    "Telegram",
+    "Android",
+    "iOS",
+    "HTTPS",
+)
+_LATIN_NAME = re.compile(r"\b(" + "|".join(re.escape(name) for name in LATIN_NAMES) + r")\b")
+
 
 @dataclass
 class Transliterator:
@@ -174,6 +193,10 @@ class Transliterator:
     def convert(self, text: str) -> str:
         if text in self.overrides:
             return self.overrides[text]
+        parts = _LATIN_NAME.split(text)
+        return "".join(part if odd else self._letters(part) for odd, part in zip([0, 1] * len(parts), parts))
+
+    def _letters(self, text: str) -> str:
         s = _APOSTROPHES.sub("'", text)
         s = s.replace("o'", "ў").replace("O'", "Ў").replace("g'", "ғ").replace("G'", "Ғ")
         out: list[str] = []
