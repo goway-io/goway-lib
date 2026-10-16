@@ -1,4 +1,5 @@
 import logging
+import re
 
 from fastapi import FastAPI
 from opentelemetry import trace
@@ -10,12 +11,31 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 logger = logging.getLogger(__name__)
 
+#: A shared haul's link is its own key (`/t/{token}` on edge, `/v1/tracking/{token}` on loads): whoever reads it can
+#: follow the haul, so the token is cut out of every log line, the access log and outgoing calls included.
+SECRET_IN_PATH = re.compile(r"(/t/|/tracking/)[^/?#\s\"]+")
+
+
+class RedactFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = SECRET_IN_PATH.sub(r"\1***", message)
+        if redacted != message:
+            record.msg, record.args = redacted, None
+        return True
+
 
 class TraceIdFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         ctx = trace.get_current_span().get_span_context()
         record.trace_id = format(ctx.trace_id, "032x") if ctx.is_valid else "-"
         return True
+
+
+def redact(target: logging.Logger | logging.Handler) -> None:
+    """uvicorn's access logger writes through its own handler, never the root's, so it gets the filter too."""
+    if not any(isinstance(f, RedactFilter) for f in target.filters):
+        target.addFilter(RedactFilter())
 
 
 def init_telemetry(
@@ -34,6 +54,8 @@ def init_telemetry(
     logging.getLogger().addFilter(TraceIdFilter())
     for handler in logging.getLogger().handlers:
         handler.addFilter(TraceIdFilter())
+        redact(handler)
+    redact(logging.getLogger("uvicorn.access"))
 
     resource = Resource.create({"service.name": service_name, "deployment.environment": env})
     provider = TracerProvider(resource=resource)
