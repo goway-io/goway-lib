@@ -48,3 +48,23 @@ async def test_events_staged_in_a_savepoint_that_rolled_back_are_never_let_go(ma
                 raise ValueError("refused")
         await db.commit()
     assert "haul.lost" not in released
+
+
+async def test_each_delivery_names_its_event_for_the_broker_to_dedupe(monkeypatch):
+    import json
+    import uuid
+
+    from goway_lib.events import outbox
+
+    sent = []
+
+    async def fake_publish(subject, payload, *, headers=None):
+        sent.append((subject, json.loads(payload), headers))
+
+    monkeypatch.setattr(outbox.publisher, "publish", fake_publish)
+    event_id = uuid.uuid7()
+    await outbox._deliver("user.created", {"user_id": "u1"}, event_id)
+    await outbox._deliver("user.created", {"user_id": "u1", "event_id": "kept"}, event_id)
+
+    assert sent[0][1]["event_id"] == sent[0][2]["Nats-Msg-Id"] == str(event_id)
+    assert sent[1][2]["Nats-Msg-Id"] == "kept", "the id the payload carries is the one the broker sees"

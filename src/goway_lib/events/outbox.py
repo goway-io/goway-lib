@@ -54,11 +54,13 @@ def publish_event(db: AsyncSession, subject: str, payload: dict) -> OutboxEvent:
 
 
 async def _deliver(subject: str, payload: dict, event_id: uuid.UUID) -> None:
+    """The event's id rides as `Nats-Msg-Id` too: when the fast path and the sweep both send one row, or a lost ack
+    makes the relay send it again, JetStream keeps one copy inside the stream's duplicate window."""
     message = dict(payload)
     message.setdefault("event_id", str(event_id))
-    headers: dict[str, str] = {}
+    headers: dict[str, str] = {"Nats-Msg-Id": str(message["event_id"])}
     propagate.inject(headers)
-    await publisher.publish(subject, json.dumps(message, default=str).encode(), headers=headers or None)
+    await publisher.publish(subject, json.dumps(message, default=str).encode(), headers=headers)
 
 
 async def _mark_published(session_factory: async_sessionmaker, event_id: uuid.UUID) -> None:
