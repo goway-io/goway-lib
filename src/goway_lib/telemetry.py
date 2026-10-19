@@ -1,5 +1,6 @@
 import logging
 import re
+from typing import Any
 
 from fastapi import FastAPI
 from opentelemetry import trace
@@ -16,12 +17,84 @@ logger = logging.getLogger(__name__)
 SECRET_IN_PATH = re.compile(r"(/t/|/tracking/)[^/?#\s\"]+")
 
 
+FILTERED = "[Filtered]"
+
+#: Phone numbers in any text an error report carries: messages, stack-frame locals (reprs), URLs (`+` sent as %2B).
+PHONE = re.compile(
+    r"(?<![\w+%])(?:\+|%2[Bb])?998[\s-]?\(?\d{2}\)?[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}(?!\d)|(?<![\w+])\+\d{10,14}(?!\d)"
+)
+#: A location written into text: a precise "41.311081, 69.240562" pair, or a `lat=41.31` style field in a repr.
+COORDINATE_PAIR = re.compile(r"-?\d{1,3}\.\d{4,}\s*,\s*-?\d{1,3}\.\d{4,}")
+COORDINATE_FIELD = re.compile(r"(?i)\b((?:\w+_)?(?:lat|lng|lon|latitude|longitude)['\"]?\s*[:=]\s*)-?\d+(?:\.\d+)?")
+
+#: Field names holding personal data, matched per word of the name (`contact_phone`, `fromLat`, `pickup_address`).
+PII_KEY_WORDS = frozenset(
+    {
+        "phone",
+        "otp",
+        "lat",
+        "lng",
+        "lon",
+        "latitude",
+        "longitude",
+        "location",
+        "coordinates",
+        "address",
+        "plate",
+        "plates",
+        "passport",
+        "waypoint",
+    }
+)
+#: Names too generic to match per word, so only the whole name counts: `code` is the sign-in code, `status_code` is not.
+PII_KEYS = frozenset({"code", "point"})
+_KEY_WORD = re.compile(r"[-_.\s]+|(?<=[a-z0-9])(?=[A-Z])")
+
+
 def scrub(value: object) -> object:
     if value is None or isinstance(value, (int, float)):
         return value
     text = str(value)
     redacted = SECRET_IN_PATH.sub(r"\1***", text)
     return value if redacted == text else redacted
+
+
+def scrub_text(text: str) -> str:
+    text = SECRET_IN_PATH.sub(r"\1***", text)
+    text = PHONE.sub(FILTERED, text)
+    text = COORDINATE_PAIR.sub(FILTERED, text)
+    return COORDINATE_FIELD.sub(rf"\1{FILTERED}", text)
+
+
+def is_pii_key(key: object) -> bool:
+    if not isinstance(key, str):
+        return False
+    if key.lower() in PII_KEYS:
+        return True
+    return any(word.lower() in PII_KEY_WORDS for word in _KEY_WORD.split(key) if word)
+
+
+def scrub_event(value: Any, depth: int = 0) -> Any:
+    if depth > 32:
+        return value
+    if isinstance(value, dict):
+        return {
+            key: FILTERED if is_pii_key(key) and item not in (None, "") else scrub_event(item, depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [scrub_event(item, depth + 1) for item in value]
+    if isinstance(value, str):
+        return scrub_text(value)
+    return value
+
+
+def before_send(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any]:
+    ctx = trace.get_current_span().get_span_context()
+    tags = event.setdefault("tags", {})
+    if ctx.is_valid and isinstance(tags, dict):
+        tags["trace_id"] = format(ctx.trace_id, "032x")
+    return scrub_event(event)
 
 
 class RedactFilter(logging.Filter):
@@ -79,6 +152,13 @@ def init_telemetry(
         try:
             import sentry_sdk
 
-            sentry_sdk.init(dsn=glitchtip_dsn, environment=env, server_name=service_name)
+            sentry_sdk.init(
+                dsn=glitchtip_dsn,
+                environment=env,
+                server_name=service_name,
+                send_default_pii=False,
+                max_request_body_size="never",
+                before_send=before_send,
+            )
         except Exception:
             logger.exception("GlitchTip init failed; continuing without error tracking")
