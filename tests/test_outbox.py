@@ -3,8 +3,9 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Session
 
+from goway_lib import metrics
 from goway_lib.db import Base
-from goway_lib.events.outbox import _dropped, _released, publish_event
+from goway_lib.events.outbox import OutboxEvent, _dropped, _released, publish_event, read_backlog
 
 
 @pytest.fixture
@@ -68,3 +69,12 @@ async def test_each_delivery_names_its_event_for_the_broker_to_dedupe(monkeypatc
 
     assert sent[0][1]["event_id"] == sent[0][2]["Nats-Msg-Id"] == str(event_id)
     assert sent[1][2]["Nats-Msg-Id"] == "kept", "the id the payload carries is the one the broker sees"
+
+
+async def test_the_backlog_gauge_reads_what_waits_and_what_gave_up(maker):
+    async with maker() as session:
+        for status in ("pending", "pending", "dead", "published"):
+            session.add(OutboxEvent(subject="booking.created", payload={}, status=status))
+        await session.commit()
+    assert await read_backlog(maker) == {"pending": 2, "dead": 1}
+    assert metrics.OUTBOX_BACKLOG == {"pending": 2, "dead": 1}

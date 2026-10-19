@@ -5,10 +5,11 @@ import uuid
 from datetime import datetime, timedelta
 
 from opentelemetry import propagate
-from sqlalchemy import JSON, Index, Integer, String, Text, delete, event, select, update
+from sqlalchemy import JSON, Index, Integer, String, Text, delete, event, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
+from goway_lib import metrics
 from goway_lib.db import BaseModel
 from goway_lib.events import publisher
 from goway_lib.timeutils import now_utc
@@ -25,6 +26,7 @@ RELAY_INTERVAL_SECONDS = 5.0
 CLEANUP_RETENTION_DAYS = 7
 PROCESSED_RETENTION_DAYS = 30
 CLEANUP_EVERY_TICKS = 720
+BACKLOG_EVERY_TICKS = 6
 
 
 class OutboxEvent(BaseModel):
@@ -77,8 +79,10 @@ async def _publish_one(session_factory: async_sessionmaker, event_id: uuid.UUID,
     try:
         await _deliver(subject, payload, event_id)
     except Exception as exc:
+        metrics.outbox_failed.add(1, {"subject": subject})
         logger.warning("outbox fast-path publish failed (relay will retry): %s %s", subject, exc)
         return
+    metrics.outbox_published.add(1, {"subject": subject, "path": "fast"})
     try:
         await asyncio.shield(_mark_published(session_factory, event_id))
     except asyncio.CancelledError:
@@ -148,16 +152,32 @@ async def relay_once(session_factory: async_sessionmaker) -> int:
             except Exception as exc:
                 row.attempts += 1
                 row.last_error = str(exc)[:500]
+                metrics.outbox_failed.add(1, {"subject": row.subject})
                 if row.attempts >= RELAY_MAX_ATTEMPTS:
                     row.status = "dead"
+                    metrics.outbox_dead.add(1, {"subject": row.subject})
                     logger.error("outbox row %s moved to dead after %d attempts", row.id, row.attempts)
                 continue
+            metrics.outbox_published.add(1, {"subject": row.subject, "path": "relay"})
             row.status = "published"
             row.published_at = now_utc()
             row.attempts += 1
             published += 1
         await session.commit()
         return published
+
+
+async def read_backlog(session_factory: async_sessionmaker) -> dict[str, int]:
+    """Rows still waiting and rows given up on, for the backlog gauge; both stay at zero when the pipeline is well."""
+    async with session_factory() as session:
+        rows = await session.execute(
+            select(OutboxEvent.status, func.count())
+            .where(OutboxEvent.status.in_(("pending", "dead")))
+            .group_by(OutboxEvent.status)
+        )
+        counts = {"pending": 0, "dead": 0} | {status: count for status, count in rows.all()}
+    metrics.OUTBOX_BACKLOG.update(counts)
+    return counts
 
 
 async def cleanup_published(session_factory: async_sessionmaker) -> int:
@@ -178,6 +198,8 @@ async def run_outbox_relay(session_factory: async_sessionmaker, *, stop: asyncio
     while stop is None or not stop.is_set():
         try:
             await relay_once(session_factory)
+            if tick % BACKLOG_EVERY_TICKS == 0:
+                await read_backlog(session_factory)
             if tick % CLEANUP_EVERY_TICKS == 0:
                 await cleanup_published(session_factory)
         except Exception:

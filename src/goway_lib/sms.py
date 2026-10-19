@@ -3,6 +3,7 @@ from typing import Protocol
 
 import httpx
 
+from goway_lib import metrics
 from goway_lib.clients import DEFAULT_LIMITS, DEFAULT_TIMEOUT
 
 logger = logging.getLogger(__name__)
@@ -15,8 +16,11 @@ class SmsProvider(Protocol):
 
 
 class ConsoleSmsProvider:
+    """Writes the text to the local log instead of sending it; a sign-in code in it never leaves for the collector."""
+
     async def send(self, phone: str, text: str) -> None:
-        logger.info("SMS to %s: %s", phone, text)
+        logger.info("SMS to %s: %s", phone, text, extra={"local_only": True})
+        metrics.sms_sent.add(1, {"provider": "console", "outcome": "ok"})
 
 
 class EskizSmsProvider:
@@ -35,6 +39,14 @@ class EskizSmsProvider:
         return self._token
 
     async def send(self, phone: str, text: str) -> None:
+        try:
+            await self._send(phone, text)
+        except Exception:
+            metrics.sms_sent.add(1, {"provider": "eskiz", "outcome": "error"})
+            raise
+        metrics.sms_sent.add(1, {"provider": "eskiz", "outcome": "ok"})
+
+    async def _send(self, phone: str, text: str) -> None:
         token = self._token or await self._login()
         response = await self._client.post(
             "/message/sms/send",
