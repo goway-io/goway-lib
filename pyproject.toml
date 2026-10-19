@@ -10,11 +10,11 @@ requires-python = ">=3.14"
 dependencies = [
     "aiobotocore>=3.9.0",
     "asyncpg>=0.31.0",
-    "fastapi>=0.141.1",
+    "fastapi>=0.143.5,<0.144",
     "httpx>=0.28.1",
     "nats-py>=2.15.0",
     "opentelemetry-exporter-otlp-proto-http>=1.44.0",
-    "opentelemetry-instrumentation-fastapi>=0.65b0",
+    "opentelemetry-instrumentation-logging>=0.65b0",
     "opentelemetry-sdk>=1.44.0",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.15.0",

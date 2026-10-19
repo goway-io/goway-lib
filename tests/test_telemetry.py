@@ -2,9 +2,24 @@ import logging
 
 import httpx
 import sentry_sdk
+from opentelemetry.sdk._logs import LoggerProvider
+from opentelemetry.sdk._logs.export import InMemoryLogRecordExporter, SimpleLogRecordProcessor
 from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from goway_lib.telemetry import FILTERED, RedactFilter, before_send, init_telemetry, scrub_event, scrub_text
+from goway_lib.telemetry import (
+    FILTERED,
+    LocalOnlyFilter,
+    RedactFilter,
+    ScrubLogProcessor,
+    ScrubSpanProcessor,
+    before_send,
+    fastapi_telemetry,
+    init_telemetry,
+    scrub_event,
+    scrub_text,
+)
 
 TOKEN = "K7Q2M9XPLR4T8VWZ3HJN6CDF5BGY2SAE"
 
@@ -15,7 +30,7 @@ def http_request(url: str | httpx.URL) -> logging.LogRecord:
 
 
 def test_the_access_log_never_holds_a_tracking_token(caplog):
-    init_telemetry(None, service_name="test", env="test")
+    init_telemetry(service_name="test", env="test")
     with caplog.at_level(logging.INFO):
         logging.getLogger("uvicorn.access").info(
             '%s - "%s %s HTTP/%s" %d', "84.54.82.215:0", "GET", f"/t/{TOKEN}", "1.1", 200
@@ -116,7 +131,48 @@ def test_a_report_inside_a_request_carries_its_trace_id():
 def test_error_tracking_never_ships_request_bodies_and_always_scrubs(monkeypatch):
     seen = {}
     monkeypatch.setattr(sentry_sdk, "init", lambda **options: seen.update(options))
-    init_telemetry(None, service_name="test", env="test", glitchtip_dsn="http://key@glitchtip:8000/1")
+    init_telemetry(service_name="test", env="test", glitchtip_dsn="http://key@glitchtip:8000/1")
     assert seen["max_request_body_size"] == "never"
     assert seen["send_default_pii"] is False
     assert seen["before_send"] is before_send
+
+
+def test_a_request_span_keeps_no_token_phone_or_coordinate():
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(ScrubSpanProcessor())
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    attributes = {"url.path": f"/t/{TOKEN}", "url.query": "phone=%2B998901234567&lat=41.311081", "http.route": "/t/{t}"}
+    provider.get_tracer("test").start_span("GET /t/{token}", attributes=attributes).end()
+    (span,) = exporter.get_finished_spans()
+    assert span.attributes["url.path"] == "/t/***"
+    assert "998901234567" not in span.attributes["url.query"] and "41.311081" not in span.attributes["url.query"]
+    assert span.attributes["http.route"] == "/t/{t}"
+
+
+def test_a_log_record_bound_for_the_collector_is_scrubbed():
+    exporter = InMemoryLogRecordExporter()
+    provider = LoggerProvider()
+    provider.add_log_record_processor(ScrubLogProcessor())
+    provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
+    logger = provider.get_logger("test")
+    logger.emit(body="booking for +998 90 123 45 67 at 41.311081, 69.240562", attributes={"pickup_address": "Chorsu 1"})
+    (record,) = exporter.get_finished_logs()
+    assert record.log_record.body == f"booking for {FILTERED} at {FILTERED}"
+    assert record.log_record.attributes["pickup_address"] == FILTERED
+
+
+def test_a_console_sms_and_the_exporters_own_failures_stay_local():
+    keep = LocalOnlyFilter()
+    text = ("+998901234567", "kod 1234")
+    sms = logging.LogRecord("goway_lib.sms", logging.INFO, __file__, 1, "SMS to %s: %s", text, None)
+    sms.local_only = True
+    failure = logging.LogRecord("opentelemetry.exporter.otlp", logging.WARNING, __file__, 1, "export failed", (), None)
+    ordinary = logging.LogRecord("app.services", logging.WARNING, __file__, 1, "booking stuck", (), None)
+    assert [keep.filter(r) for r in (sms, failure, ordinary)] == [False, False, True]
+
+
+def test_fastapi_records_every_request_but_the_health_checks():
+    settings = fastapi_telemetry()
+    assert settings["auto_configure"] is False
+    assert settings["exclude"]({"path": "/health"}) and not settings["exclude"]({"path": "/v1/loads"})
