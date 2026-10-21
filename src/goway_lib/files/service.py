@@ -15,7 +15,7 @@ media bucket's CORS rules. Its key carries no org id, because the address is pub
 import logging
 import uuid
 from collections.abc import Awaitable, Iterable, Mapping
-from datetime import timedelta
+from datetime import UTC, timedelta
 from typing import TypeVar
 
 from sqlalchemy import and_, func, or_, select, update
@@ -361,6 +361,56 @@ class FileService:
                 FileAccessLog(file_id=record.id, actor_id=viewer.user_id, actor_role=viewer.role, reason="admin_files")
             )
         return self.admin_ref(record, with_url=True)
+
+    def _operator_did(self, record: FileRecord, viewer: Actor, what: str) -> None:
+        """An operator's hand on someone's file, kept beside the views of it."""
+        self.db.add(FileAccessLog(file_id=record.id, actor_id=viewer.user_id, actor_role=viewer.role, reason=what))
+
+    async def admin_complete(self, file_id: uuid.UUID, viewer: Actor) -> AdminFileRead:
+        """Finishes an upload an operator made for an organization, whose org the file belongs to."""
+        record = or_404(await self.db.get(FileRecord, file_id), "file")
+        record = await self.complete(record.id, record.org_id)
+        if record.status == FileStatus.READY:
+            self._operator_did(record, viewer, "admin_upload")
+        return self.admin_ref(record, with_url=False)
+
+    async def admin_delete(self, file_id: uuid.UUID, viewer: Actor) -> None:
+        """Removes a file nothing uses. One a record uses, or one kept as evidence, stays."""
+        record = or_404(await self.db.get(FileRecord, file_id), "file")
+        if record.status == FileStatus.DELETED:
+            return
+        if record.ref_count > 0:
+            raise Conflict("File is in use", code="FILE_IN_USE", key="files.in_use")
+        until = record.retain_until
+        until = until.replace(tzinfo=UTC) if until is not None and until.tzinfo is None else until
+        retained = until is not None and until > now_utc()
+        if record.legal_hold or retained:
+            raise Conflict(
+                "The file is kept as evidence",
+                code="FILE_RETAINED",
+                key="files.retained",
+                params={
+                    "legal_hold": record.legal_hold,
+                    "retain_until": until.isoformat() if retained and until else None,
+                },
+            )
+        if not await self._remove_object(record):
+            raise UpstreamUnavailable("Storage unavailable", params={"service": "storage"})
+        record.status = FileStatus.DELETED
+        record.deleted_at = now_utc()
+        self._operator_did(record, viewer, "admin_delete")
+        await self.db.flush()
+
+    async def admin_hold(self, file_id: uuid.UUID, viewer: Actor, *, hold: bool) -> AdminFileRead:
+        """Keeps a file past its retention, whatever happens to the record that uses it, until released."""
+        record = or_404(await self.db.get(FileRecord, file_id), "file")
+        if record.status == FileStatus.DELETED:
+            raise Conflict("The file is deleted", code="FILE_DELETED", key="files.deleted")
+        if record.legal_hold != hold:
+            record.legal_hold = hold
+            self._operator_did(record, viewer, "admin_hold" if hold else "admin_release")
+            await self.db.flush()
+        return self.admin_ref(record, with_url=False)
 
     async def admin_summary(self) -> list[FileKindSummary]:
         """Each kind the service stores, with how many files of it are kept and how much room they take."""

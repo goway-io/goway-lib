@@ -396,3 +396,57 @@ async def test_the_files_page_api_is_for_operators_only(db, storage):
         assert (await client.get("/admin/files", params={"kind": "nope"}, headers=operator)).status_code == 422
         opened = await client.get(f"/admin/files/{photo.id}", headers=operator)
         assert opened.status_code == 200 and opened.json()["url"]
+
+
+async def test_an_operator_uploads_for_an_organization_and_the_file_is_theirs(files, storage):
+    operator = Actor(user_id=uuid.uuid7(), org_id=uuid.uuid7(), role="superadmin", role_id=None, rv=1, iat=0)
+    ticket = await files.create_upload(
+        org_id=ORG,
+        created_by=operator.user_id,
+        kind="identity_document",
+        content_type="application/pdf",
+        size_bytes=len(PDF),
+    )
+    storage.put(await files.db.get(FileRecord, ticket.file_id), PDF)
+
+    done = await files.admin_complete(ticket.file_id, operator)
+    assert done.status == "ready" and done.org_id == ORG and done.created_by == operator.user_id
+    assert await files.attach(ticket.file_id, ORG, kinds=("identity_document",)), "the driver's record can use it"
+    logged = (await files.db.execute(select(FileAccessLog))).scalars().all()
+    assert [(row.actor_id, row.reason) for row in logged] == [(operator.user_id, "admin_upload")]
+
+
+async def test_an_operator_deletes_only_what_nothing_uses_or_keeps(files, storage):
+    operator = Actor(user_id=uuid.uuid7(), org_id=uuid.uuid7(), role="superadmin", role_id=None, rv=1, iat=0)
+    loose = await uploaded(files, storage, kind="avatar")
+    used = await uploaded(files, storage, kind="avatar")
+    evidence = await uploaded(files, storage, kind="trip_photo")
+    for record in (loose, used, evidence):
+        await files.complete(record.id, ORG)
+    await files.attach(used.id, ORG, kinds=("avatar",))
+    await files.attach(evidence.id, ORG, kinds=("trip_photo",))
+    await files.detach(evidence.id)
+
+    with pytest.raises(Conflict) as refused:
+        await files.admin_delete(used.id, operator)
+    assert refused.value.code == "FILE_IN_USE"
+    with pytest.raises(Conflict) as refused:
+        await files.admin_delete(evidence.id, operator)
+    assert refused.value.code == "FILE_RETAINED" and refused.value.params["retain_until"]
+
+    held = await files.admin_hold(loose.id, operator, hold=True)
+    assert held.legal_hold
+    with pytest.raises(Conflict) as refused:
+        await files.admin_delete(loose.id, operator)
+    assert refused.value.code == "FILE_RETAINED" and refused.value.params["legal_hold"]
+    assert not (await files.admin_hold(loose.id, operator, hold=False)).legal_hold
+
+    await files.admin_delete(loose.id, operator)
+    record = await files.db.get(FileRecord, loose.id)
+    assert record.status == FileStatus.DELETED and (record.bucket, record.key) not in storage.objects
+    await files.admin_delete(loose.id, operator)
+    with pytest.raises(Conflict) as refused:
+        await files.admin_hold(loose.id, operator, hold=True)
+    assert refused.value.code == "FILE_DELETED"
+    reasons = [row.reason for row in (await files.db.execute(select(FileAccessLog))).scalars().all()]
+    assert reasons == ["admin_hold", "admin_release", "admin_delete"]

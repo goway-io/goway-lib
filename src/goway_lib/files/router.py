@@ -121,6 +121,76 @@ def files_admin_router(service_dependency: Callable[..., FileService], kinds: Ma
         """One page of files with what an operator needs to find one."""
         return await files.admin_page(pages, kind=kind, status=status_filter, org_id=org_id, attached=attached)
 
+    AdminUploadIn = create_model(
+        "AdminUploadIn",
+        org_id=(uuid.UUID, Field(description="The organization the file is uploaded for; it owns the file.")),
+        kind=(Kind, Field(description="What the file is for; decides size, types and access.")),
+        content_type=(str, Field(max_length=100, examples=["image/jpeg"])),
+        size_bytes=(int, Field(gt=0, description="Exact length of the file in bytes.")),
+        name=(str | None, Field(default=None, max_length=255, description="Original file name, optional.")),
+    )
+    HoldIn = create_model(
+        "HoldIn", hold=(bool, Field(description="Keep the file past its retention (true) or let it go (false)."))
+    )
+
+    @router.post(
+        "/uploads",
+        status_code=status.HTTP_201_CREATED,
+        summary="Upload for an organization",
+        description=(
+            "An operator's upload on someone's behalf: the file belongs to `org_id`, the operator is its author. "
+            "Then PUT the bytes to `url` and call `complete`, as in the apps. Accepts `Idempotency-Key`."
+        ),
+        responses=problem_responses(400, 401, 403, 422),
+    )
+    async def operator_upload(body: AdminUploadIn, actor: CurrentActor, files: Files) -> UploadRead:
+        """Get a presigned PUT URL for a file uploaded on an organization's behalf."""
+        return await files.create_upload(
+            org_id=body.org_id,
+            created_by=actor.user_id,
+            kind=body.kind,
+            content_type=body.content_type,
+            size_bytes=body.size_bytes,
+            name=body.name,
+        )
+
+    @router.post(
+        "/{file_id}/complete",
+        summary="Finish an operator's upload",
+        description="Checks the stored object like the apps' `complete`: `ready`, or `rejected` with the reason.",
+        responses=problem_responses(400, 401, 403, 404),
+    )
+    async def operator_complete(file_id: uuid.UUID, actor: CurrentActor, files: Files) -> AdminFileRead:
+        """Confirm an operator's upload finished."""
+        return await files.admin_complete(file_id, actor)
+
+    @router.delete(
+        "/{file_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        summary="Delete file",
+        description=(
+            "Removes a file nothing uses. `FILE_IN_USE` (409) when a record uses it; `FILE_RETAINED` (409) while it "
+            "is kept as evidence (`params.legal_hold`, `params.retain_until`). Logged with the operator."
+        ),
+        responses=problem_responses(401, 403, 404, 409, 502),
+    )
+    async def delete_file(file_id: uuid.UUID, actor: CurrentActor, files: Files) -> None:
+        """Delete a file nothing uses."""
+        await files.admin_delete(file_id, actor)
+
+    @router.put(
+        "/{file_id}/hold",
+        summary="Hold or release",
+        description=(
+            "A legal hold keeps the file past its retention and from any deletion until an operator releases it. "
+            "Logged with the operator. `FILE_DELETED` (409) for a file already gone."
+        ),
+        responses=problem_responses(401, 403, 404, 409, 422),
+    )
+    async def hold_file(file_id: uuid.UUID, body: HoldIn, actor: CurrentActor, files: Files) -> AdminFileRead:
+        """Put a legal hold on a file or release it."""
+        return await files.admin_hold(file_id, actor, hold=body.hold)
+
     @router.get(
         "/{file_id}",
         summary="Open file",
