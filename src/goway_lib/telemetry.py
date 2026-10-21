@@ -1,5 +1,7 @@
 import logging
+import os
 import re
+import socket
 from collections.abc import MutableMapping
 from typing import Any
 
@@ -188,6 +190,12 @@ def redact(target: logging.Logger | logging.Handler) -> None:
         target.addFilter(RedactFilter())
 
 
+def instance_id() -> str:
+    """This process among the service's processes: its container and its pid. Several uvicorn workers export the
+    same counters, and without it their cumulative values land in one series and every rate turns to noise."""
+    return f"{socket.gethostname()}-{os.getpid()}"
+
+
 def init_telemetry(
     *,
     service_name: str,
@@ -206,7 +214,9 @@ def init_telemetry(
         redact(handler)
     redact(logging.getLogger("uvicorn.access"))
 
-    resource = Resource.create({"service.name": service_name, "deployment.environment.name": env})
+    resource = Resource.create(
+        {"service.name": service_name, "deployment.environment.name": env, "service.instance.id": instance_id()}
+    )
     tracer_provider = TracerProvider(resource=resource)
     tracer_provider.add_span_processor(ScrubSpanProcessor())
     readers = []

@@ -12,6 +12,10 @@ from opentelemetry.metrics import CallbackOptions, Observation
 
 meter = metrics.get_meter("goway.events")
 
+#: Histogram boundaries in seconds, from a few milliseconds to two minutes. The SDK's defaults (0, 5, 10, 25, …) are
+#: meant for milliseconds: in seconds every delivery under five lands in the first bucket and every percentile reads
+#: 4.75, whatever happened.
+SECONDS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120)
 #: Last counts the relay read, by status; the backlog gauge reports them as they are.
 OUTBOX_BACKLOG: dict[str, int] = {}
 #: Messages each durable consumer has not been delivered yet, as JetStream last reported.
@@ -40,10 +44,16 @@ consumer_processed = meter.create_counter(
     "goway.consumer.processed", unit="{message}", description="Deliveries handled, by outcome"
 )
 consumer_duration = meter.create_histogram(
-    "goway.consumer.duration", unit="s", description="Time a handler took for one delivery"
+    "goway.consumer.duration",
+    unit="s",
+    description="Time a handler took for one delivery",
+    explicit_bucket_boundaries_advisory=SECONDS,
 )
 consumer_lag = meter.create_histogram(
-    "goway.consumer.lag", unit="s", description="Time an event waited in the stream before this delivery"
+    "goway.consumer.lag",
+    unit="s",
+    description="Time an event waited in the stream before this delivery",
+    explicit_bucket_boundaries_advisory=SECONDS,
 )
 meter.create_observable_gauge(
     "goway.consumer.pending",
