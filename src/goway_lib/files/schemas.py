@@ -33,3 +33,27 @@ class FileRef(BaseModel):
     url: str | None = Field(description="View URL once the file is ready; short-lived unless the file is public.")
     expires_at: datetime | None = Field(description="When `url` stops working; null for public files.")
     reject_reason: RejectReason | None = Field(default=None, description="Why a `rejected` upload was refused.")
+
+
+class AdminFileRead(FileRef):
+    """A file as an operator sees it: what it is, whose it is, and whether anything still uses it."""
+
+    org_id: uuid.UUID = Field(description="The organization that uploaded it.")
+    created_by: uuid.UUID | None = Field(description="Who uploaded it; null for a file the system made.")
+    created_at: datetime
+    attached: bool = Field(description="A record uses the file; one nothing uses is swept a day after.")
+    sensitive: bool = Field(
+        description=(
+            "A personal document. A list leaves its `url` null; `GET /admin/files/{id}` gives it, and that view "
+            "is logged."
+        )
+    )
+    retain_until: datetime | None = Field(description="Kept as evidence until then, whatever happens to the record.")
+    legal_hold: bool = Field(description="Kept until an operator lifts the hold.")
+
+
+class FileKindSummary(BaseModel):
+    kind: str = Field(examples=["delivery_photo"])
+    sensitive: bool = Field(description="Personal documents: viewing one is logged.")
+    count: int = Field(description="Files of this kind that are not deleted.", examples=[1284])
+    bytes: int = Field(description="Their total size.", examples=[524288000])

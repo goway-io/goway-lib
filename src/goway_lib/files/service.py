@@ -18,14 +18,15 @@ from collections.abc import Awaitable, Iterable, Mapping
 from datetime import timedelta
 from typing import TypeVar
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from goway_lib.auth import Actor
-from goway_lib.errors import BadRequest, Conflict, NotFound, UpstreamUnavailable
+from goway_lib.errors import BadRequest, Conflict, NotFound, UpstreamUnavailable, or_404
 from goway_lib.files.kinds import FileKind, sniff
 from goway_lib.files.models import FileAccessLog, FileRecord, FileStatus
-from goway_lib.files.schemas import FileRef, UploadRead
+from goway_lib.files.schemas import AdminFileRead, FileKindSummary, FileRef, UploadRead
+from goway_lib.pagination import OffsetPage, PageParams, paginate_offset
 from goway_lib.storage import STORAGE_ERRORS, Storage, StorageClass
 from goway_lib.timeutils import now_utc
 
@@ -305,6 +306,76 @@ class FileService:
                     FileAccessLog(file_id=record.id, actor_id=viewer.user_id, actor_role=viewer.role, reason=reason)
                 )
         return result
+
+    def admin_ref(self, record: FileRecord, *, with_url: bool) -> AdminFileRead:
+        """The file for an operator. A personal document keeps its address out of lists: it is handed over only
+        when the operator opens that one file, so the access log records views, not page loads."""
+        spec = self.kinds.get(record.kind)
+        sensitive = bool(spec and spec.sensitive)
+        ref = self.ref(record)
+        if sensitive and not with_url:
+            ref = ref.model_copy(update={"url": None, "expires_at": None})
+        return AdminFileRead(
+            **ref.model_dump(),
+            org_id=record.org_id,
+            created_by=record.created_by,
+            created_at=record.created_at,
+            attached=record.ref_count > 0,
+            sensitive=sensitive,
+            retain_until=record.retain_until,
+            legal_hold=record.legal_hold,
+        )
+
+    async def admin_page(
+        self,
+        pages: PageParams,
+        *,
+        kind: str | None = None,
+        status: FileStatus | None = None,
+        org_id: uuid.UUID | None = None,
+        attached: bool | None = None,
+    ) -> OffsetPage[AdminFileRead]:
+        """Every file the service stores, newest first; deleted ones only when asked for by status."""
+        where = [FileRecord.status == status] if status else [FileRecord.status != FileStatus.DELETED]
+        if kind:
+            where.append(FileRecord.kind == kind)
+        if org_id:
+            where.append(FileRecord.org_id == org_id)
+        if attached is not None:
+            where.append(FileRecord.ref_count > 0 if attached else FileRecord.ref_count == 0)
+        return await paginate_offset(
+            self.db,
+            select(FileRecord).where(*where),
+            number=pages.number,
+            size=pages.size,
+            order_by=[FileRecord.created_at.desc(), FileRecord.id.desc()],
+            transformer=lambda record: self.admin_ref(record, with_url=False),
+        )
+
+    async def admin_view(self, file_id: uuid.UUID, viewer: Actor) -> AdminFileRead:
+        """One file with its address. Opening someone's personal document is logged, as on the review page."""
+        record = or_404(await self.db.get(FileRecord, file_id), "file")
+        spec = self.kinds.get(record.kind)
+        if spec and spec.sensitive and record.status == FileStatus.READY and record.org_id != viewer.org_id:
+            self.db.add(
+                FileAccessLog(file_id=record.id, actor_id=viewer.user_id, actor_role=viewer.role, reason="admin_files")
+            )
+        return self.admin_ref(record, with_url=True)
+
+    async def admin_summary(self) -> list[FileKindSummary]:
+        """Each kind the service stores, with how many files of it are kept and how much room they take."""
+        q = (
+            select(FileRecord.kind, func.count(), func.coalesce(func.sum(FileRecord.size_bytes), 0))
+            .where(FileRecord.status != FileStatus.DELETED)
+            .group_by(FileRecord.kind)
+        )
+        found = {kind: (count, int(size)) for kind, count, size in await self.db.execute(q)}
+        return [
+            FileKindSummary(
+                kind=code, sensitive=spec.sensitive, count=found.get(code, (0, 0))[0], bytes=found.get(code, (0, 0))[1]
+            )
+            for code, spec in self.kinds.items()
+        ]
 
     async def delete_unattached(self, file_id: uuid.UUID, org_id: uuid.UUID) -> None:
         record = await self.get_owned(file_id, org_id)

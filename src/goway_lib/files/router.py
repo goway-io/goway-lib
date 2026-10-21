@@ -2,14 +2,16 @@ import uuid
 from collections.abc import Callable, Mapping
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, status
 from pydantic import Field, create_model
 
-from goway_lib.auth import CurrentActor
+from goway_lib.auth import CurrentActor, Requires
 from goway_lib.errors import problem_responses
 from goway_lib.files.kinds import FileKind
-from goway_lib.files.schemas import FileRef, UploadRead
+from goway_lib.files.models import FileStatus
+from goway_lib.files.schemas import AdminFileRead, FileKindSummary, FileRef, UploadRead
 from goway_lib.files.service import FileService
+from goway_lib.pagination import OffsetPage, Page, PageInfo, PageQuery
 
 
 def files_router(service_dependency: Callable[..., FileService], kinds: Mapping[str, FileKind]) -> APIRouter:
@@ -79,5 +81,54 @@ def files_router(service_dependency: Callable[..., FileService], kinds: Mapping[
     async def delete_file(file_id: uuid.UUID, actor: CurrentActor, files: Files) -> None:
         """Delete a file that is not in use."""
         await files.delete_unattached(file_id, actor.org_id)
+
+    return router
+
+
+def files_admin_router(service_dependency: Callable[..., FileService], kinds: Mapping[str, FileKind]) -> APIRouter:
+    """Every file a service stores, for the operators' Files page, under ``/admin/files``. Superadmin only."""
+    router = APIRouter(prefix="/admin/files", tags=["Admin"], dependencies=[Depends(Requires("superadmin"))])
+    Files = Annotated[FileService, Depends(service_dependency)]
+    Kind = Literal[tuple(kinds)]
+
+    @router.get(
+        "/summary",
+        summary="Files by kind",
+        description="Each kind the service stores: whether it is a personal document, how many files, their size.",
+        responses=problem_responses(401, 403),
+    )
+    async def summary(files: Files) -> Page[FileKindSummary]:
+        """Count and size per file kind."""
+        return Page(items=await files.admin_summary(), page=PageInfo())
+
+    @router.get(
+        "",
+        summary="List files",
+        description=(
+            "Files newest first, deleted ones only when `status=deleted`. Each has a view `url` except personal "
+            "documents (`sensitive`), whose address comes only from `GET /admin/files/{id}` so the view is logged."
+        ),
+        responses=problem_responses(401, 403, 422),
+    )
+    async def list_files(
+        files: Files,
+        pages: PageQuery,
+        kind: Annotated[Kind | None, Query(description="One file kind.")] = None,
+        status_filter: Annotated[FileStatus | None, Query(alias="status", description="One upload state.")] = None,
+        org_id: Annotated[uuid.UUID | None, Query(description="One organization's files.")] = None,
+        attached: Annotated[bool | None, Query(description="Used by a record (true) or by nothing (false).")] = None,
+    ) -> OffsetPage[AdminFileRead]:
+        """One page of files with what an operator needs to find one."""
+        return await files.admin_page(pages, kind=kind, status=status_filter, org_id=org_id, attached=attached)
+
+    @router.get(
+        "/{file_id}",
+        summary="Open file",
+        description="The file with a fresh view URL. Opening someone's personal document is logged.",
+        responses=problem_responses(401, 403, 404),
+    )
+    async def open_file(file_id: uuid.UUID, actor: CurrentActor, files: Files) -> AdminFileRead:
+        """One file with its address."""
+        return await files.admin_view(file_id, actor)
 
     return router

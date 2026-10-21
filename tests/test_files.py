@@ -334,3 +334,65 @@ async def test_files_of_a_kind_that_became_public_are_moved_there(files, storage
     assert (old.bucket, old.storage_class) == ("pub", StorageClass.PUBLIC)
     assert storage.objects.get(("pub", old.key)) == JPEG and ("m", old.key) not in storage.objects
     assert public.ref(old).expires_at is None
+
+
+async def test_operators_list_every_file_but_open_a_personal_document_one_at_a_time(files, storage):
+    from goway_lib.pagination import PageParams
+
+    document = await uploaded(files, storage, kind="identity_document", body=PDF, content_type="application/pdf")
+    photo = await uploaded(files, storage, kind="trip_photo")
+    other_org = await uploaded(files, storage, kind="avatar", org=uuid.uuid7())
+    for record in (document, photo):
+        await files.complete(record.id, ORG)
+    await files.complete(other_org.id, other_org.org_id)
+    await files.attach(photo.id, ORG, kinds=("trip_photo",))
+    admin = Actor(user_id=uuid.uuid7(), org_id=uuid.uuid7(), role="superadmin", role_id=None, rv=1, iat=0)
+
+    listed = await files.admin_page(PageParams())
+    rows = {row.id: row for row in listed.items}
+    assert listed.page.total == 3 and set(rows) == {document.id, photo.id, other_org.id}
+    assert rows[document.id].sensitive and rows[document.id].url is None, "a list never hands out a document"
+    assert rows[photo.id].url and rows[photo.id].attached and not rows[document.id].attached
+    assert (await files.db.execute(select(FileAccessLog))).scalars().all() == []
+
+    assert [row.id for row in (await files.admin_page(PageParams(), kind="trip_photo")).items] == [photo.id]
+    assert [row.id for row in (await files.admin_page(PageParams(), org_id=ORG, attached=False)).items] == [document.id]
+
+    opened = await files.admin_view(document.id, admin)
+    assert opened.url and opened.url.startswith("https://storage.example.uz/p/")
+    logged = (await files.db.execute(select(FileAccessLog))).scalars().all()
+    assert [(row.file_id, row.reason) for row in logged] == [(document.id, "admin_files")]
+    await files.admin_view(photo.id, admin)
+    assert len((await files.db.execute(select(FileAccessLog))).scalars().all()) == 1, "only documents are logged"
+
+    summary = {row.kind: row for row in await files.admin_summary()}
+    assert set(summary) == set(KINDS)
+    assert (summary["trip_photo"].count, summary["trip_photo"].bytes) == (1, len(JPEG))
+    assert summary["identity_document"].sensitive and summary["reference_image"].count == 0
+
+
+async def test_the_files_page_api_is_for_operators_only(db, storage):
+    from goway_lib.files import files_admin_router
+
+    auth.configure_auth(jwt_secret="j" * 32)
+    app = FastAPI()
+    install_handlers(app)
+    service = FileService(db, storage, KINDS, service="auth")
+    app.include_router(files_admin_router(lambda: service, KINDS))
+    photo = await uploaded(service, storage, kind="trip_photo")
+    await service.complete(photo.id, ORG)
+
+    def headers(role: str) -> dict:
+        token = auth.mint_access_token(user_id=uuid.uuid7(), org_id=uuid.uuid7(), role=role, role_id=uuid.uuid7(), rv=1)
+        return {"Authorization": f"Bearer {token}"}
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        assert (await client.get("/admin/files", headers=headers("carrier"))).status_code == 403
+        operator = headers("superadmin")
+        summary = await client.get("/admin/files/summary", headers=operator)
+        assert summary.status_code == 200 and {row["kind"] for row in summary.json()["items"]} == set(KINDS)
+        listed = await client.get("/admin/files", params={"kind": "trip_photo"}, headers=operator)
+        assert listed.status_code == 200 and [row["id"] for row in listed.json()["items"]] == [str(photo.id)]
+        assert (await client.get("/admin/files", params={"kind": "nope"}, headers=operator)).status_code == 422
+        opened = await client.get(f"/admin/files/{photo.id}", headers=operator)
+        assert opened.status_code == 200 and opened.json()["url"]
