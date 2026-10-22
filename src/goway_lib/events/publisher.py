@@ -38,6 +38,7 @@ DEFAULT_SUBJECTS = [
     "rating.>",
     "support.>",
     "org.>",
+    "membership.>",
 ]
 
 

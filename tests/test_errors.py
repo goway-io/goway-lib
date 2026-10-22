@@ -47,6 +47,8 @@ def test_every_published_subject_is_stream_covered():
         "region.updated",
         "load.posted",
         "booking.created",
+        "membership.created",
+        "membership.removed",
     ]
     prefixes = tuple(s[:-1] for s in DEFAULT_SUBJECTS if s.endswith(">"))
     uncovered = [s for s in published if not s.startswith(prefixes)]
