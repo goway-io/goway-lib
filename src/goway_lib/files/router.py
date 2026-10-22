@@ -10,12 +10,19 @@ from goway_lib.errors import problem_responses
 from goway_lib.files.kinds import FileKind
 from goway_lib.files.models import FileStatus
 from goway_lib.files.schemas import AdminFileRead, FileKindSummary, FileRef, UploadRead
-from goway_lib.files.service import FileService
+from goway_lib.files.service import FileService, SharedWith
 from goway_lib.pagination import OffsetPage, Page, PageInfo, PageQuery
 
 
-def files_router(service_dependency: Callable[..., FileService], kinds: Mapping[str, FileKind]) -> APIRouter:
-    """Upload endpoints under ``/v1/files``, identical in every service that stores files."""
+def files_router(
+    service_dependency: Callable[..., FileService],
+    kinds: Mapping[str, FileKind],
+    *,
+    shared: SharedWith | None = None,
+    shared_rule: str | None = None,
+) -> APIRouter:
+    """Upload endpoints under ``/v1/files``, identical in every service that stores files. `shared` opens a file to
+    the parties of the record that uses it, as the service decides; `shared_rule` says who they are in the docs."""
     router = APIRouter(prefix="/v1/files", tags=["Files"])
     Files = Annotated[FileService, Depends(service_dependency)]
     UploadIn = create_model(
@@ -64,12 +71,17 @@ def files_router(service_dependency: Callable[..., FileService], kinds: Mapping[
     @router.get(
         "/{file_id}",
         summary="Get file",
-        description="The file with a fresh view URL. Only the owning organization.",
+        description=(
+            "The file with a fresh view URL, for the organization that uploaded it"
+            + (f" and for {shared_rule}" if shared_rule else "")
+            + ". Anyone else gets 404 `NOT_FOUND`, the same as for a file that does not exist. Ask again for a new "
+            "URL when `expires_at` has passed."
+        ),
         responses=problem_responses(401, 404),
     )
     async def get_file(file_id: uuid.UUID, actor: CurrentActor, files: Files) -> FileRef:
-        """Read one of the organization's files."""
-        return files.ref(await files.get_owned(file_id, actor.org_id))
+        """Read a file the caller may see."""
+        return files.ref(await files.get_viewable(file_id, actor, shared))
 
     @router.delete(
         "/{file_id}",

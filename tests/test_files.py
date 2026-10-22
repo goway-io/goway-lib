@@ -450,3 +450,28 @@ async def test_an_operator_deletes_only_what_nothing_uses_or_keeps(files, storag
     assert refused.value.code == "FILE_DELETED"
     reasons = [row.reason for row in (await files.db.execute(select(FileAccessLog))).scalars().all()]
     assert reasons == ["admin_hold", "admin_release", "admin_delete"]
+
+
+async def test_a_file_opens_for_the_parties_its_service_shares_it_with_and_is_missing_for_everyone_else(files, storage):
+    photo = await uploaded(files, storage)
+    document = await uploaded(files, storage, kind="identity_document", body=PDF, content_type="application/pdf")
+    for record in (photo, document):
+        await files.complete(record.id, ORG)
+    owner = Actor(user_id=uuid.uuid7(), org_id=ORG, role="carrier", role_id=None, rv=1, iat=0)
+    party = Actor(user_id=uuid.uuid7(), org_id=uuid.uuid7(), role="shipper", role_id=None, rv=1, iat=0)
+    stranger = Actor(user_id=uuid.uuid7(), org_id=uuid.uuid7(), role="shipper", role_id=None, rv=1, iat=0)
+
+    async def shared(db, viewer, record):
+        return viewer.org_id == party.org_id
+
+    assert (await files.get_viewable(photo.id, owner)).id == photo.id
+    assert (await files.get_viewable(photo.id, party, shared)).id == photo.id
+    for viewer, rule in ((party, None), (stranger, shared)):
+        with pytest.raises(NotFound):
+            await files.get_viewable(photo.id, viewer, rule)
+    with pytest.raises(NotFound):
+        await files.get_viewable(uuid.uuid7(), party, shared)
+
+    await files.get_viewable(document.id, party, shared)
+    logged = (await files.db.execute(select(FileAccessLog))).scalars().all()
+    assert [(row.file_id, row.actor_id, row.reason) for row in logged] == [(document.id, party.user_id, "shared")]

@@ -14,7 +14,7 @@ media bucket's CORS rules. Its key carries no org id, because the address is pub
 
 import logging
 import uuid
-from collections.abc import Awaitable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import UTC, timedelta
 from typing import TypeVar
 
@@ -39,6 +39,10 @@ VIEW_TTL_SECONDS = 600
 UNUSED_AFTER = timedelta(hours=24)
 DETACH_GRACE = timedelta(days=1)
 SNIFF_BYTES = 64
+
+#: Whether someone outside the file's organization may open it: a party to the record that uses the file, as the
+#: service that stores it decides. Never asked for the owner, nor for a file that is not ready.
+SharedWith = Callable[[AsyncSession, Actor, FileRecord], Awaitable[bool]]
 
 
 def _clean_name(name: str | None) -> str | None:
@@ -142,6 +146,27 @@ class FileService:
         record = await self.db.get(FileRecord, file_id)
         if record is None or record.org_id != org_id or record.status == FileStatus.DELETED:
             raise NotFound("file not found", key="common.not_found", params={"resource": "file"})
+        return record
+
+    async def get_viewable(self, file_id: uuid.UUID, viewer: Actor, shared: SharedWith | None = None) -> FileRecord:
+        """The file for its own organization, or for a party the service shares it with. Everyone else gets the same
+        404 as for a file that does not exist, so an id tells a stranger nothing. A personal document opened from
+        outside its organization is logged."""
+        record = await self.db.get(FileRecord, file_id)
+        if record is not None and record.status != FileStatus.DELETED and record.org_id == viewer.org_id:
+            return record
+        if (
+            record is None
+            or shared is None
+            or record.status != FileStatus.READY
+            or not await shared(self.db, viewer, record)
+        ):
+            raise NotFound("file not found", key="common.not_found", params={"resource": "file"})
+        spec = self.kinds.get(record.kind)
+        if spec is not None and spec.sensitive:
+            self.db.add(
+                FileAccessLog(file_id=record.id, actor_id=viewer.user_id, actor_role=viewer.role, reason="shared")
+            )
         return record
 
     async def complete(self, file_id: uuid.UUID, org_id: uuid.UUID) -> FileRecord:
