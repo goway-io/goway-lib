@@ -9,6 +9,7 @@ from opentelemetry import trace
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from goway_lib.errors import Problem, UnprocessableEntity, problem_responses
+from goway_lib.middleware import RejectNulMiddleware
 
 _STATUS_PROBLEMS = {
     404: ("NOT_FOUND", "Not found"),
@@ -74,7 +75,10 @@ def _document_validation_problems(app: FastAPI) -> None:
 
 
 def install_handlers(app: FastAPI) -> None:
+    """How the app answers bad input and failures: problem+json for every error, and a NUL character in the
+    path, query or body refused as a 422 before it can reach Postgres."""
     _document_validation_problems(app)
+    app.add_middleware(RejectNulMiddleware)
 
     @app.exception_handler(Problem)
     async def handle_problem(request: Request, exc: Problem) -> JSONResponse:

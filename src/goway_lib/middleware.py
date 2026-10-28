@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import re
 import uuid
@@ -105,3 +106,78 @@ class CancelOnDisconnectMiddleware:
             for task in (pump_task, watch_task):
                 if not task.done():
                     task.cancel()
+
+
+#: A NUL character as it can arrive: raw, as a JSON escape, or percent-encoded in a query or form.
+_NUL_FORMS = (b"\x00", b"\\u0000", b"%00")
+#: Bodies read whole to look for it: the JSON and form posts the APIs take. Uploads go straight to storage.
+_INSPECTED_BODIES = (b"application/json", b"application/x-www-form-urlencoded")
+
+
+class RejectNulMiddleware:
+    """Postgres cannot store the NUL character in text, so a request carrying one used to fail deep inside an insert
+    and answer 500. It is refused at the door instead, as a 422 validation problem: in the path, the query string
+    or a JSON or form body."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope: Message, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        if "\x00" in scope.get("path", "") or _has_nul(scope.get("query_string", b"")):
+            await _reject(scope, send, "query" if scope.get("query_string") else "path")
+            return
+        content_type = next((value for name, value in scope.get("headers", []) if name == b"content-type"), b"")
+        if not content_type.lower().startswith(_INSPECTED_BODIES):
+            await self.app(scope, receive, send)
+            return
+        chunks: list[bytes] = []
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                await self.app(scope, _replay([], message, receive), send)
+                return
+            chunks.append(message.get("body", b""))
+            if not message.get("more_body", False):
+                break
+        body = b"".join(chunks)
+        if _has_nul(body):
+            await _reject(scope, send, "body")
+            return
+        await self.app(scope, _replay([body], None, receive), send)
+
+
+def _has_nul(raw: bytes) -> bool:
+    lowered = raw.lower()
+    return any(form in lowered for form in _NUL_FORMS)
+
+
+def _replay(bodies: list[bytes], pending: Message | None, receive: Receive) -> Receive:
+    """The body already read, handed to the app once; after that the real channel (for the disconnect)."""
+    queue: list[Message] = [{"type": "http.request", "body": body, "more_body": False} for body in bodies]
+    if pending is not None:
+        queue.append(pending)
+
+    async def replayed() -> Message:
+        if queue:
+            return queue.pop(0)
+        return await receive()
+
+    return replayed
+
+
+async def _reject(scope: Message, send: Send, where: str) -> None:
+    from goway_lib.errors import UnprocessableEntity
+
+    problem = UnprocessableEntity(errors=[{"field": where, "message": "Text must not contain the NUL character."}])
+    body = json.dumps(problem.to_dict(instance=scope.get("path"))).encode()
+    await send(
+        {
+            "type": "http.response.start",
+            "status": problem.status,
+            "headers": [(b"content-type", b"application/problem+json"), (b"content-length", str(len(body)).encode())],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
