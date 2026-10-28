@@ -15,6 +15,7 @@ import asyncpg
 from sqlalchemy import MetaData, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.pool import NullPool
 
 LOCAL_SERVER = "postgresql+asyncpg://postgres:postgres@localhost:55432"
 
@@ -24,10 +25,14 @@ def database_url(service: str) -> str:
     return os.environ.get("TEST_DATABASE_URL") or f"{LOCAL_SERVER}/goway_test_{service}"
 
 
-def fresh_engine(url: str, *, pool_size: int = 2, max_overflow: int = 8) -> AsyncEngine:
-    """An engine for one test, with a small pool: a new SCRAM login costs about a hundred times the query it makes,
-    so connections are reused within the test. Dispose it before the test's event loop ends, as the fixtures do."""
-    return create_async_engine(url, pool_size=pool_size, max_overflow=max_overflow)
+def fresh_engine(url: str, *, pool_size: int | None = None) -> AsyncEngine:
+    """An engine for one test. Without `pool_size` it keeps no connections, which is safe when the app under test
+    runs on another event loop (schemathesis serves requests from its own thread); with one, connections are reused
+    within the test, which is faster because each new SCRAM login costs about a hundred times a query. Dispose it
+    before the test's event loop ends."""
+    if pool_size is None:
+        return create_async_engine(url, poolclass=NullPool)
+    return create_async_engine(url, pool_size=pool_size, max_overflow=pool_size * 4)
 
 
 async def _ensure_database(url: str) -> None:
