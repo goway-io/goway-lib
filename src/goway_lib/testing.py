@@ -1,8 +1,8 @@
 """Test support shared by the services: tests run against a real Postgres, as production does.
 
 A service's conftest calls `prepare_database(url, metadata)` once per session (a clean `public` schema with every
-table), opens a `fresh_engine(url)` per test, and calls `truncate_all(engine, metadata)` when the test ends, so each
-test starts from empty tables without paying for a schema rebuild.
+table), opens a `fresh_engine(url)` per test and disposes it at the end, after `truncate_all(engine, metadata)`
+has emptied every table, so each test starts clean without paying for a schema rebuild.
 
 `TEST_DATABASE_URL` points at the server and database to use; without it the default is the local test server that
 `make test-db` starts (port 55432), with one database per service so their suites can run side by side.
@@ -15,7 +15,6 @@ import asyncpg
 from sqlalchemy import MetaData, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
-from sqlalchemy.pool import NullPool
 
 LOCAL_SERVER = "postgresql+asyncpg://postgres:postgres@localhost:55432"
 
@@ -25,9 +24,10 @@ def database_url(service: str) -> str:
     return os.environ.get("TEST_DATABASE_URL") or f"{LOCAL_SERVER}/goway_test_{service}"
 
 
-def fresh_engine(url: str) -> AsyncEngine:
-    """An engine for one test: no pool, so nothing outlives the test's event loop."""
-    return create_async_engine(url, poolclass=NullPool)
+def fresh_engine(url: str, *, pool_size: int = 2, max_overflow: int = 8) -> AsyncEngine:
+    """An engine for one test, with a small pool: a new SCRAM login costs about a hundred times the query it makes,
+    so connections are reused within the test. Dispose it before the test's event loop ends, as the fixtures do."""
+    return create_async_engine(url, pool_size=pool_size, max_overflow=max_overflow)
 
 
 async def _ensure_database(url: str) -> None:
