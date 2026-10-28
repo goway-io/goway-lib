@@ -70,16 +70,11 @@ def prepare_database(url: str, metadata: MetaData) -> None:
 
 
 async def truncate_all(engine: AsyncEngine, metadata: MetaData) -> None:
-    """Empties the tables the test wrote to and restarts their sequences, so the next test starts clean. One query
-    finds the non-empty tables and one statement truncates them: truncating all of them every time cost about
-    200 ms per test on a 38-table schema, most tests touch a handful."""
-    names = [table.name for table in metadata.sorted_tables]
-    if not names:
+    """Empties every table in one statement and restarts their sequences, so the next test starts clean. All of
+    them, not only the ones that look used: TRUNCATE waits for a write still open at teardown and removes it too,
+    while a probe for non-empty tables would miss it and leak the row into the next test."""
+    tables = ", ".join(f'"{table.name}"' for table in metadata.sorted_tables)
+    if not tables:
         return
-    # Table names come from the models' metadata, never from input.
-    probe = " union all ".join(f"select '{name}' as name where exists (select 1 from \"{name}\")" for name in names)  # noqa: S608
     async with engine.begin() as connection:
-        used = [row[0] for row in await connection.execute(text(probe))]
-        if used:
-            tables = ", ".join(f'"{name}"' for name in used)
-            await connection.execute(text(f"truncate {tables} restart identity cascade"))  # noqa: S608
+        await connection.execute(text(f"truncate {tables} restart identity cascade"))  # noqa: S608 - names from metadata
