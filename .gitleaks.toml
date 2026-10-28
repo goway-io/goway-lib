@@ -1,0 +1,12 @@
+# gitleaks: the default rules, minus fixtures that only look like secrets (fake tokens, keys and JWTs in
+# tests and in schema examples). A real secret never belongs in these paths either; review before adding one.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "test fixtures and schema examples"
+paths = [
+  '''(^|/)tests/''',
+  '''(^|/)examples/''',
+  '''(^|/)asyncapi/[^/]+\.json$''',
+]
