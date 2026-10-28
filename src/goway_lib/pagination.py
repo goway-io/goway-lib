@@ -52,6 +52,10 @@ class OffsetPage(Schema, Generic[T]):
         return cls(items=items, page=page)
 
 
+#: The last page number a client may ask for, so page * size stays far inside Postgres's bigint OFFSET.
+MAX_PAGE = 1_000_000
+
+
 @dataclass(frozen=True)
 class PageParams:
     number: int = 1
@@ -59,7 +63,7 @@ class PageParams:
 
 
 def page_params(
-    page: Annotated[int, Query(ge=1, description="1-based page number.")] = 1,
+    page: Annotated[int, Query(ge=1, le=MAX_PAGE, description="1-based page number.")] = 1,
     size: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE, description="Rows per page.")] = DEFAULT_PAGE_SIZE,
 ) -> PageParams:
     return PageParams(number=page, size=size)

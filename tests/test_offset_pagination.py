@@ -91,3 +91,20 @@ async def test_rows_tied_on_the_sort_column_keep_a_stable_place(db):
         page = await repo.list_offset_page(pages=PageParams(number=number, size=2), order_by=Row.created_at.asc())
         seen += [row.label for row in page.items]
     assert sorted(seen) == sorted({f"row-{n}" for n in range(7)})
+
+
+def test_a_page_beyond_the_bound_is_a_validation_error_not_a_500():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from goway_lib.pagination import MAX_PAGE, PageQuery
+
+    app = FastAPI()
+
+    @app.get("/rows")
+    def rows(pages: PageQuery) -> dict:
+        return {"page": pages.number}
+
+    client = TestClient(app)
+    assert client.get("/rows", params={"page": MAX_PAGE}).json() == {"page": MAX_PAGE}
+    assert client.get("/rows", params={"page": "9223372036854775808"}).status_code == 422
