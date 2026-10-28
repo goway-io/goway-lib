@@ -135,7 +135,8 @@ async def _fetch(client: httpx.AsyncClient, cursor: str | None) -> dict:
             failing = not isinstance(exc, httpx.HTTPStatusError) or exc.response.status_code >= 500
             if not failing or attempt == FETCH_ATTEMPTS:
                 raise
-            await asyncio.sleep(random.uniform(0, min(300.0, 2.0 * 2 ** (attempt - 1))))
+            # Jitter for the retry delay, not a secret.
+            await asyncio.sleep(random.uniform(0, min(300.0, 2.0 * 2 ** (attempt - 1))))  # noqa: S311
 
 
 async def sync(session_factory: async_sessionmaker, client: httpx.AsyncClient) -> int | None:

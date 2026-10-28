@@ -100,7 +100,7 @@ class CancelOnDisconnectMiddleware:
                     await send({"type": "http.response.start", "status": 499, "headers": []})
                     await send({"type": "http.response.body", "body": b""})
                 except Exception:
-                    pass
+                    logger.debug("client gone before the 499 could be sent", exc_info=True)
         finally:
             for task in (pump_task, watch_task):
                 if not task.done():

@@ -194,7 +194,9 @@ class Transliterator:
         if text in self.overrides:
             return self.overrides[text]
         parts = _LATIN_NAME.split(text)
-        return "".join(part if odd else self._letters(part) for odd, part in zip([0, 1] * len(parts), parts))
+        return "".join(
+            part if odd else self._letters(part) for odd, part in zip([0, 1] * len(parts), parts, strict=False)
+        )
 
     def _letters(self, text: str) -> str:
         s = _APOSTROPHES.sub("'", text)

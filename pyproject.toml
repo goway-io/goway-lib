@@ -24,6 +24,9 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.52",
 ]
 
+[project.scripts]
+goway-lint-migrations = "goway_lib.migration_lint:main"
+
 [build-system]
 requires = ["uv_build>=0.12.1,<0.13.0"]
 build-backend = "uv_build"
@@ -41,7 +44,11 @@ line-length = 120
 target-version = "py314"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "W"]
+# B: bugbear, likely bugs; S: bandit, security smells. Tests may assert and carry fixture secrets.
+select = ["E", "F", "I", "W", "B", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S107", "S311", "S603", "S607"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
