@@ -7,6 +7,15 @@ class ServiceSettings(BaseSettings):
     SERVICE_NAME: str
     ENV: str = "dev"
     DATABASE_URL: str
+    # The process's share of Postgres connections: it keeps `pool_size` open and borrows up to `max_overflow` more
+    # under load, waiting `DB_POOL_TIMEOUT_SECONDS` for one before failing. A worker needs fewer than the API. The
+    # sum of size + overflow over every process on a database must stay under its `max_connections`.
+    DB_POOL_SIZE: int = 4
+    DB_MAX_OVERFLOW: int = 4
+    DB_WORKER_POOL_SIZE: int = 2
+    DB_WORKER_MAX_OVERFLOW: int = 2
+    DB_POOL_TIMEOUT_SECONDS: float = 10
+    DB_POOL_RECYCLE_SECONDS: int = 1800
     REDIS_URL: str = "redis://localhost:6379/0"
     NATS_URL: str = "nats://localhost:4222"
     GLITCHTIP_DSN: str = ""

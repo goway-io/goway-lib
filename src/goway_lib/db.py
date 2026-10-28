@@ -9,8 +9,46 @@ from goway_lib.errors import FieldTooLong
 from goway_lib.timeutils import now_utc
 
 
-def make_engine(database_url: str, *, echo: bool = False) -> AsyncEngine:
-    return create_async_engine(database_url, echo=echo, pool_pre_ping=True)
+def make_engine(
+    database_url: str,
+    *,
+    echo: bool = False,
+    pool_size: int = 4,
+    max_overflow: int = 4,
+    pool_timeout: float = 10,
+    pool_recycle: int = 1800,
+    application_name: str | None = None,
+) -> AsyncEngine:
+    """One pool per process with a fixed budget. LIFO checkout keeps a quiet process on one or two connections,
+    so the rest sit idle long enough for the server's idle timeout to close them; pre-ping and recycling replace a
+    connection the server dropped before a query sees it. On Postgres the connection carries `application_name`,
+    so `pg_stat_activity` says which process holds which connection."""
+    options: dict = {"echo": echo, "pool_pre_ping": True}
+    if not database_url.startswith("sqlite"):
+        options.update(
+            pool_size=pool_size,
+            max_overflow=max_overflow,
+            pool_timeout=pool_timeout,
+            pool_recycle=pool_recycle,
+            pool_use_lifo=True,
+        )
+    if database_url.startswith("postgresql+asyncpg") and application_name:
+        options["connect_args"] = {"server_settings": {"application_name": application_name}, "timeout": 10}
+    return create_async_engine(database_url, **options)
+
+
+def engine_from_settings(settings, *, role: str = "api", echo: bool = False) -> AsyncEngine:
+    """The process's engine from its settings: an API process gets the larger share, a worker the smaller."""
+    worker = role == "worker"
+    return make_engine(
+        settings.DATABASE_URL,
+        echo=echo,
+        pool_size=settings.DB_WORKER_POOL_SIZE if worker else settings.DB_POOL_SIZE,
+        max_overflow=settings.DB_WORKER_MAX_OVERFLOW if worker else settings.DB_MAX_OVERFLOW,
+        pool_timeout=settings.DB_POOL_TIMEOUT_SECONDS,
+        pool_recycle=settings.DB_POOL_RECYCLE_SECONDS,
+        application_name=f"{settings.SERVICE_NAME}-{role}",
+    )
 
 
 def make_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
