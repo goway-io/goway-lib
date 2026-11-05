@@ -44,3 +44,48 @@ def test_public_url_uses_the_public_base_or_falls_back_to_the_bucket_path():
 
 def test_bucket_by_class_accepts_the_string_form():
     assert make_storage().bucket("private") == "p"
+
+
+class FakeBody:
+    def __init__(self, data: bytes):
+        self.data = data
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def read(self, size: int = -1) -> bytes:
+        chunk, self.data = (self.data, b"") if size < 0 else (self.data[:size], self.data[size:])
+        return chunk
+
+
+class FakeS3:
+    def __init__(self):
+        self.objects: dict[tuple[str, str], tuple[bytes, str]] = {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def put_object(self, *, Bucket, Key, Body, ContentType):  # noqa: N803 - boto3 argument names
+        self.objects[Bucket, Key] = (Body, ContentType)
+
+    async def get_object(self, *, Bucket, Key):  # noqa: N803 - boto3 argument names
+        return {"Body": FakeBody(self.objects[Bucket, Key][0])}
+
+
+async def test_put_then_stream_reads_the_object_back_in_chunks(monkeypatch):
+    storage = make_storage()
+    fake = FakeS3()
+    monkeypatch.setattr(storage, "_client", lambda: fake)
+
+    await storage.put("p", "market/raw/doc", b"abcdefgh", content_type="application/pdf")
+    async with storage.stream("p", "market/raw/doc") as body:
+        chunks = [await body.read(3), await body.read(3), await body.read(3), await body.read(3)]
+
+    assert fake.objects["p", "market/raw/doc"][1] == "application/pdf"
+    assert chunks == [b"abc", b"def", b"gh", b""]

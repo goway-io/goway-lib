@@ -7,6 +7,8 @@ DELETE, CORS, versioning, lifecycle — so any S3-compatible store works by chan
 """
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from urllib.parse import quote
@@ -136,6 +138,19 @@ class Storage:
             response = await s3.get_object(Bucket=bucket, Key=key, Range=f"bytes=0-{length - 1}")
             async with response["Body"] as body:
                 return await body.read()
+
+    async def put(self, bucket: str, key: str, data: bytes, *, content_type: str) -> None:
+        """Writes an object the service produced itself, such as a fetched document; clients upload presigned."""
+        async with self._client() as s3:
+            await s3.put_object(Bucket=bucket, Key=key, Body=data, ContentType=content_type)
+
+    @asynccontextmanager
+    async def stream(self, bucket: str, key: str) -> AsyncIterator:
+        """The object's body, read in chunks with `await body.read(size)`, for files too large to hold in memory."""
+        async with self._client() as s3:
+            response = await s3.get_object(Bucket=bucket, Key=key)
+            async with response["Body"] as body:
+                yield body
 
     async def copy(self, source_bucket: str, key: str, target_bucket: str) -> None:
         async with self._client() as s3:
