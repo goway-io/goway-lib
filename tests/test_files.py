@@ -25,7 +25,7 @@ from goway_lib.files import (
     sniff,
 )
 from goway_lib.handlers import install_handlers
-from goway_lib.storage import ObjectInfo, Storage
+from goway_lib.testing import MemoryStorage
 from goway_lib.timeutils import now_utc
 
 JPEG = b"\xff\xd8\xff\xe0" + b"\0" * 96
@@ -37,37 +37,6 @@ KINDS = kind_map(
     FileKind("trip_photo", StorageClass.MEDIA, 5_000, IMAGE_TYPES, retain_days=1095),
     FileKind("reference_image", StorageClass.PUBLIC, 5_000, IMAGE_TYPES),
 )
-
-
-class MemoryStorage(Storage):
-    def __init__(self):
-        super().__init__(
-            endpoint="http://seaweedfs:8333",
-            public_endpoint="https://storage.example.uz",
-            access_key="k",
-            secret_key="s",
-            buckets={StorageClass.PRIVATE: "p", StorageClass.MEDIA: "m", StorageClass.PUBLIC: "pub"},
-        )
-        self.objects: dict[tuple[str, str], bytes] = {}
-        self.fail_deletes = False
-
-    def put(self, record: FileRecord, body: bytes) -> None:
-        self.objects[(record.bucket, record.key)] = body
-
-    async def head(self, bucket, key):
-        body = self.objects.get((bucket, key))
-        return None if body is None else ObjectInfo(size=len(body), content_type=None)
-
-    async def read_prefix(self, bucket, key, length=64):
-        return self.objects[(bucket, key)][:length]
-
-    async def delete(self, bucket, key):
-        if self.fail_deletes:
-            raise ConnectionError("storage down")
-        self.objects.pop((bucket, key), None)
-
-    async def copy(self, source_bucket, key, target_bucket):
-        self.objects[(target_bucket, key)] = self.objects[(source_bucket, key)]
 
 
 @pytest.fixture
@@ -82,7 +51,7 @@ async def db():
 
 @pytest.fixture
 def storage():
-    return MemoryStorage()
+    return MemoryStorage(public_endpoint="https://storage.example.uz")
 
 
 @pytest.fixture
@@ -98,7 +67,7 @@ async def uploaded(files, storage, kind="avatar", body=JPEG, content_type="image
         org_id=org, created_by=None, kind=kind, content_type=content_type, size_bytes=len(body), name="C:\\x\\me.jpg"
     )
     record = await files.db.get(FileRecord, ticket.file_id)
-    storage.put(record, body)
+    storage.objects[record.bucket, record.key] = body
     return record
 
 
@@ -296,7 +265,8 @@ async def test_router_upload_complete_get_and_delete(db, storage):
         )
         assert started.status_code == 201 and started.json()["method"] == "PUT"
         file_id = started.json()["file_id"]
-        storage.put(await db.get(FileRecord, uuid.UUID(file_id)), JPEG)
+        record = await db.get(FileRecord, uuid.UUID(file_id))
+        storage.objects[record.bucket, record.key] = JPEG
         done = await client.post(f"/v1/files/{file_id}/complete", headers=headers)
         assert done.json()["status"] == "ready" and done.json()["url"]
         assert (await client.get(f"/v1/files/{file_id}", headers=headers)).json()["name"] == "a.jpg"
@@ -407,7 +377,8 @@ async def test_an_operator_uploads_for_an_organization_and_the_file_is_theirs(fi
         content_type="application/pdf",
         size_bytes=len(PDF),
     )
-    storage.put(await files.db.get(FileRecord, ticket.file_id), PDF)
+    record = await files.db.get(FileRecord, ticket.file_id)
+    storage.objects[record.bucket, record.key] = PDF
 
     done = await files.admin_complete(ticket.file_id, operator)
     assert done.status == "ready" and done.org_id == ORG and done.created_by == operator.user_id

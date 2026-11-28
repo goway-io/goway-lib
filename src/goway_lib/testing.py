@@ -2,7 +2,8 @@
 
 A service's conftest calls `prepare_database(url, metadata)` once per session (a clean `public` schema with every
 table), opens a `fresh_engine(url)` per test and disposes it at the end, after `truncate_all(engine, metadata)`
-has emptied every table, so each test starts clean without paying for a schema rebuild.
+has emptied every table, so each test starts clean without paying for a schema rebuild. `MemoryStorage` stands in
+for object storage.
 
 `TEST_DATABASE_URL` points at the server and database to use; without it the default is the local test server that
 `make test-db` starts (port 55432), with one database per service so their suites can run side by side.
@@ -17,19 +18,16 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from goway_lib.storage import ObjectInfo, Storage, StorageClass
+
 LOCAL_SERVER = "postgresql+asyncpg://postgres:postgres@localhost:55432"
 
 
 def database_url(service: str) -> str:
-    """The database this service's tests use: `TEST_DATABASE_URL`, or `goway_test_<service>` on the local server."""
     return os.environ.get("TEST_DATABASE_URL") or f"{LOCAL_SERVER}/goway_test_{service}"
 
 
 def fresh_engine(url: str, *, pool_size: int | None = None) -> AsyncEngine:
-    """An engine for one test. Without `pool_size` it keeps no connections, which is safe when the app under test
-    runs on another event loop (schemathesis serves requests from its own thread); with one, connections are reused
-    within the test, which is faster because each new SCRAM login costs about a hundred times a query. Dispose it
-    before the test's event loop ends."""
     if pool_size is None:
         return create_async_engine(url, poolclass=NullPool)
     return create_async_engine(url, pool_size=pool_size, max_overflow=pool_size * 4)
@@ -59,22 +57,58 @@ async def _rebuild_schema(url: str, metadata: MetaData) -> None:
 
 
 async def prepare_database_async(url: str, metadata: MetaData) -> None:
-    """Creates the database if it is missing and rebuilds its schema from the models."""
     await _ensure_database(url)
     await _rebuild_schema(url, metadata)
 
 
 def prepare_database(url: str, metadata: MetaData) -> None:
-    """`prepare_database_async` for a synchronous session-scoped fixture, which runs before any test's loop."""
     asyncio.run(prepare_database_async(url, metadata))
 
 
 async def truncate_all(engine: AsyncEngine, metadata: MetaData) -> None:
-    """Empties every table in one statement and restarts their sequences, so the next test starts clean. All of
-    them, not only the ones that look used: TRUNCATE waits for a write still open at teardown and removes it too,
-    while a probe for non-empty tables would miss it and leak the row into the next test."""
     tables = ", ".join(f'"{table.name}"' for table in metadata.sorted_tables)
     if not tables:
         return
     async with engine.begin() as connection:
         await connection.execute(text(f"truncate {tables} restart identity cascade"))  # noqa: S608 - names from metadata
+
+
+class MemoryStorage(Storage):
+    def __init__(self, *, down: bool = False, endpoint: str = "http://storage.test", public_endpoint: str = ""):
+        super().__init__(
+            endpoint=endpoint,
+            public_endpoint=public_endpoint,
+            access_key="k",
+            secret_key="s",  # noqa: S106 - a fake store's key
+            buckets={StorageClass.PRIVATE: "p", StorageClass.MEDIA: "m", StorageClass.PUBLIC: "pub"},
+        )
+        self.objects: dict[tuple[str, str], bytes] = {}
+        self.down = down
+        self.fail_deletes = False
+
+    def _reach(self) -> None:
+        if self.down:
+            raise ConnectionError("storage down")
+
+    async def head(self, bucket: str, key: str) -> ObjectInfo | None:
+        self._reach()
+        body = self.objects.get((bucket, key))
+        return None if body is None else ObjectInfo(size=len(body), content_type=None)
+
+    async def read_prefix(self, bucket: str, key: str, length: int = 64) -> bytes:
+        self._reach()
+        return self.objects[bucket, key][:length]
+
+    async def put(self, bucket: str, key: str, data: bytes, *, content_type: str) -> None:
+        self._reach()
+        self.objects[bucket, key] = data
+
+    async def copy(self, source_bucket: str, key: str, target_bucket: str) -> None:
+        self._reach()
+        self.objects[target_bucket, key] = self.objects[source_bucket, key]
+
+    async def delete(self, bucket: str, key: str) -> None:
+        self._reach()
+        if self.fail_deletes:
+            raise ConnectionError("storage down")
+        self.objects.pop((bucket, key), None)

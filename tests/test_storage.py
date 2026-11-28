@@ -1,5 +1,7 @@
 from urllib.parse import parse_qs, urlparse
 
+from botocore.exceptions import ClientError
+
 from goway_lib.storage import Storage, StorageClass
 
 BUCKETS = {StorageClass.PRIVATE: "p", StorageClass.MEDIA: "m", StorageClass.PUBLIC: "pub"}
@@ -62,14 +64,12 @@ class FakeBody:
 
 
 class FakeS3:
-    def __init__(self):
+    """The calls a test needs from an aiobotocore S3 client, recorded in order."""
+
+    def __init__(self, existing: set[str] = frozenset()):
         self.objects: dict[tuple[str, str], tuple[bytes, str]] = {}
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
+        self.existing = set(existing)
+        self.calls: list[tuple[str, dict]] = []
 
     async def put_object(self, *, Bucket, Key, Body, ContentType):  # noqa: N803 - boto3 argument names
         self.objects[Bucket, Key] = (Body, ContentType)
@@ -77,11 +77,28 @@ class FakeS3:
     async def get_object(self, *, Bucket, Key):  # noqa: N803 - boto3 argument names
         return {"Body": FakeBody(self.objects[Bucket, Key][0])}
 
+    async def delete_object(self, **kwargs):
+        self.calls.append(("delete_object", kwargs))
 
-async def test_put_then_stream_reads_the_object_back_in_chunks(monkeypatch):
-    storage = make_storage()
+    async def head_bucket(self, *, Bucket):  # noqa: N803 - boto3 argument names
+        if Bucket not in self.existing:
+            raise ClientError({"Error": {"Code": "404"}}, "HeadBucket")
+
+    def __getattr__(self, name):
+        async def record(**kwargs):
+            self.calls.append((name, kwargs))
+
+        return record
+
+
+def with_fake(storage: Storage, fake: FakeS3) -> Storage:
+    storage._client = fake
+    return storage
+
+
+async def test_put_then_stream_reads_the_object_back_in_chunks():
     fake = FakeS3()
-    monkeypatch.setattr(storage, "_client", lambda: fake)
+    storage = with_fake(make_storage(), fake)
 
     await storage.put("p", "market/raw/doc", b"abcdefgh", content_type="application/pdf")
     async with storage.stream("p", "market/raw/doc") as body:
@@ -89,3 +106,41 @@ async def test_put_then_stream_reads_the_object_back_in_chunks(monkeypatch):
 
     assert fake.objects["p", "market/raw/doc"][1] == "application/pdf"
     assert chunks == [b"abc", b"def", b"gh", b""]
+
+
+async def test_delete_is_one_plain_delete_without_versions():
+    fake = FakeS3()
+    await with_fake(make_storage(), fake).delete("p", "auth/doc/1")
+    assert fake.calls == [("delete_object", {"Bucket": "p", "Key": "auth/doc/1"})]
+
+
+def test_presigned_urls_carry_no_checksum_parameters():
+    storage = make_storage()
+    put = parse_qs(
+        urlparse(storage.presign_put("m", "k", content_type="image/png", content_length=9, expires_in=60)).query
+    )
+    get = parse_qs(urlparse(storage.presign_get("m", "k", expires_in=60)).query)
+    assert not [name for name in (*put, *get) if "checksum" in name.lower()]
+
+
+async def test_one_client_serves_every_call_until_closed():
+    async with make_storage() as storage:
+        first = await storage._s3()
+        assert await storage._s3() is first
+    assert storage._client is None
+
+
+async def test_provision_creates_missing_buckets_with_lifecycle_and_cors_only_where_browsers_upload():
+    fake = FakeS3(existing={"p"})
+    await with_fake(make_storage(), fake).provision(cors_origins=["https://app.example.uz"])
+
+    names = [name for name, _ in fake.calls]
+    assert ("create_bucket", {"Bucket": "m"}) in fake.calls and ("create_bucket", {"Bucket": "pub"}) in fake.calls
+    assert ("create_bucket", {"Bucket": "p"}) not in fake.calls
+    assert "put_bucket_versioning" not in names
+    lifecycles = [kwargs for name, kwargs in fake.calls if name == "put_bucket_lifecycle_configuration"]
+    assert [rule["ID"] for kwargs in lifecycles for rule in kwargs["LifecycleConfiguration"]["Rules"]] == [
+        "abort-incomplete-uploads"
+    ] * 3
+    cors = {kwargs["Bucket"] for name, kwargs in fake.calls if name == "put_bucket_cors"}
+    assert cors == {"p", "m"}
